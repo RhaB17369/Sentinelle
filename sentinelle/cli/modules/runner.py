@@ -4,6 +4,7 @@ from rich.table import Table
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich import box
 from ..core.state import state
+import os
 
 class ModuleRunner:
     def __init__(self, console: Console):
@@ -47,38 +48,98 @@ class ModuleRunner:
         self._pause()
 
     def run_traffic_analysis(self):
-        from intelligence.traffic_analyzer import EncryptedTrafficAnalyzer
-        
+        try:
+            from intelligence.traffic_analyzer import EncryptedTrafficAnalyzer
+            from intelligence.pcap_analyzer import PcapAnalyzer
+        except ImportError:
+            self.console.print("[red]Error: Scapy not installed. Cannot run traffic analysis.[/]")
+            self._pause()
+            return
+
         self.console.print("\n[bold cyan]═══ Encrypted Traffic Analysis ═══[/]\n")
+        self.console.print("[dim]Supports .pcap and .pcapng files. Extracts JA3/JA3S fingerprints.[/]")
         
+        pcap_path = input("Enter path to PCAP file: ")
+        
+        if not pcap_path:
+            self.console.print("[yellow]No file provided. Aborting.[/]")
+            self._pause()
+            return
+            
+        if not os.path.exists(pcap_path):
+             self.console.print(f"[red]File not found: {pcap_path}[/]")
+             self._pause()
+             return
+
         analyzer = EncryptedTrafficAnalyzer()
-        session = {
-            'client_hello': {
-                'version': 771,
-                'ciphers': [49195, 49199, 52393],
-                'extensions': [0, 10, 11, 13],
-                'curves': [23, 24, 25],
-                'point_formats': [0],
-            }
-        }
+        pcap_reader = PcapAnalyzer()
         
-        with Progress(SpinnerColumn(), TextColumn("[cyan]Analyzing TLS session..."), console=self.console) as progress:
+        sessions_found = 0
+        threats_found = 0
+        
+        with Progress(SpinnerColumn(), TextColumn("[cyan]Parsing PCAP packets..."), console=self.console) as progress:
             task = progress.add_task("", total=None)
-            time.sleep(1)
-            result = analyzer.analyze_session(session)
+            
+            try:
+                raw_sessions = pcap_reader.process_pcap(pcap_path)
+            except Exception as e:
+                self.console.print(f"[red]Error parsing PCAP: {e}[/]")
+                self._pause()
+                return
+
+        if not raw_sessions:
+            self.console.print("[yellow]No TLS Handshakes found in capture file.[/]")
+            self._pause()
+            return
+
+        table = Table(title=f"Traffic Analysis Report ({os.path.basename(pcap_path)})", box=box.ROUNDED)
+        table.add_column("Time", style="dim")
+        table.add_column("Source", style="cyan")
+        table.add_column("Destination", style="cyan")
+        table.add_column("Fingerprint type", style="white")
+        table.add_column("JA3/JA3S Hash", style="green")
+        table.add_column("Threat", style="red")
         
-        table = Table(title="Traffic Analysis Results", box=box.ROUNDED)
-        table.add_column("Metric", style="cyan")
-        table.add_column("Value", style="green")
-        
-        table.add_row("JA3 Fingerprint", result.get('ja3', 'N/A')[:32] + "...")
-        table.add_row("Threat Detected", "✓ Yes" if result.get('threat_detected') else "✗ No")
-        table.add_row("Threat Type", result.get('threat_type', 'None'))
+        for sess in raw_sessions:
+            analysis_result = analyzer.analyze_session(sess)
+            
+            fingerprint = ""
+            f_type = ""
+            
+            if analysis_result.get('ja3'):
+                fingerprint = analysis_result['ja3']
+                f_type = "Client (JA3)"
+            elif analysis_result.get('ja3s'):
+                fingerprint = analysis_result['ja3s']
+                f_type = "Server (JA3S)"
+            
+            if not fingerprint:
+                continue
+                
+            sessions_found += 1
+            threat_status = "CLEAN"
+            if analysis_result.get('threat_detected'):
+                threat_status = f"MALWARE: {analysis_result['threat_type']}"
+                threats_found += 1
+            
+            # Truncate hash to fit
+            hash_display = fingerprint[:16] + "..."
+            
+            table.add_row(
+                f"{sess['timestamp']:.2f}",
+                sess['src'],
+                sess['dst'],
+                f_type,
+                hash_display,
+                threat_status
+            )
         
         self.console.print(table)
-        if result.get('threat_detected'):
-            state.threats_detected += 1
-            state.add_log("Threat detected in traffic analysis", "red")
+        self.console.print(f"\n[bold]Summary:[/] {sessions_found} TLS sessions analyzed. [bold red]{threats_found} threats detected.[/]")
+        
+        if threats_found > 0:
+            state.threats_detected += threats_found
+            state.add_log(f"PCAP Analysis: {threats_found} threats in {os.path.basename(pcap_path)}", "red")
         
         self._pause()
 
@@ -272,6 +333,137 @@ class ModuleRunner:
 
     def run_malware_genome(self):
         self.console.print("[yellow]Module under development[/]")
+        self._pause()
+
+    def run_domain_collector(self):
+        from collectors.domain_collector import DomainCollector
+        
+        self.console.print("\n[bold cyan]═══ Domain Intelligence (OSINT) ═══[/]\n")
+        domain = input("Enter domain to investigate: ")
+        
+        collector = DomainCollector()
+        
+        with Progress(SpinnerColumn(), TextColumn("[cyan]Gathering intelligence..."), console=self.console) as progress:
+            task = progress.add_task("", total=None)
+            result = collector.collect(domain)
+        
+        self.console.print(f"\n[bold green]Report for {domain}[/]")
+        
+        # DNS Info
+        if result.get('dns'):
+            table = Table(title="DNS Records", box=box.ROUNDED)
+            table.add_column("Type", style="cyan")
+            table.add_column("Value", style="white")
+            for record_type, values in result['dns'].items():
+                for val in values:
+                    table.add_row(record_type, val)
+            self.console.print(table)
+            
+        # Tech Stack
+        if result.get('technologies'):
+            self.console.print("\n[bold]Detected Technologies:[/]")
+            for tech in result['technologies']:
+                self.console.print(f"  • {tech}")
+
+        state.add_log(f"Domain intel: {domain}")
+        self._pause()
+
+    def run_ip_collector(self):
+        from collectors.ip_collector import IPCollector
+        
+        self.console.print("\n[bold cyan]═══ IP Intelligence (OSINT) ═══[/]\n")
+        ip = input("Enter IP address: ")
+        
+        collector = IPCollector()
+        
+        with Progress(SpinnerColumn(), TextColumn("[cyan]Geolocating and analyzing..."), console=self.console) as progress:
+            task = progress.add_task("", total=None)
+            result = collector.collect(ip)
+            
+        self.console.print(f"\n[bold green]Report for {ip} ({result.get('type', 'unknown')})[/]")
+        
+        # Geo Info
+        if result.get('geolocation'):
+            geo = result['geolocation']
+            self.console.print(f"[bold]Location:[/] {geo.get('city')}, {geo.get('country')}")
+            self.console.print(f"[bold]ISP:[/] {geo.get('isp')}")
+            self.console.print(f"[bold]ASN:[/] {geo.get('as')}")
+        
+        # ASN Info (if separate)
+        if result.get('asn'):
+            asn = result['asn']
+            self.console.print(f"[bold]ASN Description:[/] {asn.get('asn_description')}")
+            
+        state.add_log(f"IP intel: {ip}")
+        self._pause()
+
+    def run_person_collector(self):
+        from collectors.person_collector import PersonCollector
+        
+        self.console.print("\n[bold cyan]═══ Person Intelligence (OSINT) ═══[/]\n")
+        self.console.print("[yellow]⚠️  Ethical Constraint: Public lawful data only[/]")
+        identifier = input("Enter email or username: ")
+        
+        collector = PersonCollector()
+        
+        with Progress(SpinnerColumn(), TextColumn("[cyan]Searching public footprint..."), console=self.console) as progress:
+            task = progress.add_task("", total=None)
+            result = collector.collect(identifier)
+            
+        self.console.print(f"\n[bold green]Report for {identifier}[/]")
+        
+        if result.get('breach_exposure'):
+            breach = result['breach_exposure']
+            if breach.get('checked'):
+                self.console.print(f"[bold]Breach Status:[/] {breach.get('breach_count')} breaches found")
+            else:
+                self.console.print(f"[dim]{breach.get('reason')}[/]")
+                
+        state.add_log(f"Person intel: {identifier}")
+        self._pause()
+
+    def run_network_scanner(self):
+        from scanners.network_scanner import NetworkScanner
+        
+        self.console.print("\n[bold red]═══ ACTIVE Network Scanner ═══[/]\n")
+        self.console.print("[bold red]⚠️  WARNING: Unauthorized scanning is ILLEGAL.[/]")
+        target = input("Enter target IP/Hostname: ")
+        
+        scanner = NetworkScanner()
+        
+        self.console.print("\nSelect Scan Mode:")
+        self.console.print("1. Fast (Common ports)")
+        self.console.print("2. Full (1-1024)")
+        mode = input("> ")
+        
+        ports = None
+        if mode == "2":
+            ports = list(range(1, 1025))
+            
+        with Progress(SpinnerColumn(), TextColumn("[red]Scanning target (Active)..."), console=self.console) as progress:
+            task = progress.add_task("", total=None)
+            result = scanner.scan(target, ports=ports)
+            
+        self.console.print(f"\n[bold green]Scan Complete for {target}[/]")
+        self.console.print(f"Time: {result['scan_duration']}s | Open: {len(result['open_ports'])}")
+        
+        if result['open_ports']:
+            table = Table(title="Open Ports", box=box.ROUNDED)
+            table.add_column("Port", style="cyan")
+            table.add_column("Service", style="green")
+            table.add_column("Banner/Version", style="dim white")
+            
+            for p in result['open_ports']:
+                banner = p.get('banner') or p.get('product') or ""
+                if p.get('version'):
+                    banner += f" {p.get('version')}"
+                table.add_row(str(p['port']), p['service'], banner)
+            
+            self.console.print(table)
+        else:
+            self.console.print("[yellow]No open ports found (or filtered)[/]")
+            
+        state.add_log(f"Network scan: {target}", "red")
         self._pause()
 
     def _pause(self):

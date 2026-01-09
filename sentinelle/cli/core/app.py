@@ -30,23 +30,55 @@ class App:
             if choice == "0" or choice.lower() == "q":
                 self.renderer.print_message("[yellow]Exiting SENTINNELLE...[/]")
                 break
-            
-            try:
-                idx = int(choice) - 1
-                module_def = registry.get_by_index(idx)
                 
-                if module_def:
-                    # Dynamically call the method on the runner
-                    if hasattr(self.runner, module_def.runner_method):
-                        method = getattr(self.runner, module_def.runner_method)
-                        method()
-                    else:
-                        self.renderer.print_message(f"[red]Method {module_def.runner_method} not implemented[/]")
-                else:
-                    self.renderer.print_message("[red]Invalid choice[/]")
-                    
-            except ValueError:
-                self.renderer.print_message("[red]Invalid input[/]")
+            choice_lower = choice.lower()
+            if choice_lower == "h":
+                self._show_help()
+                continue
+                
+            module_def = None
+            if choice_lower == "a":
+                module_def = registry.get_by_id("apt")
+            elif choice_lower == "b":
+                module_def = registry.get_by_id("blockchain")
+            elif choice_lower == "t":
+                module_def = registry.get_by_id("traffic")
+            else:
+                try:
+                    idx = int(choice) - 1
+                    module_def = registry.get_by_index(idx)
+                except ValueError:
+                    pass
+
+            if module_def:
+                self._run_module(module_def)
+            else:
+                self.renderer.print_message("[red]Invalid choice or input[/]")
+                
+    def _run_module(self, module_def):
+        if hasattr(self.runner, module_def.runner_method):
+            method = getattr(self.runner, module_def.runner_method)
+            method()
+        else:
+            self.renderer.print_message(f"[red]Method {module_def.runner_method} not implemented[/]")
+
+    def _show_help(self):
+        from rich.panel import Panel
+        from rich.table import Table
+        from rich import box
+        
+        table = Table(box=box.MINIMAL)
+        table.add_column("Key", style="cyan")
+        table.add_column("Action", style="white")
+        table.add_row("1-15", "Run specific module")
+        table.add_row("A", "Quick run: APT Attribution")
+        table.add_row("B", "Quick run: Blockchain Intel")
+        table.add_row("T", "Quick run: Traffic Analysis")
+        table.add_row("H", "Show this help screen")
+        table.add_row("Q", "Quit application")
+        
+        self.renderer.console.print(Panel(table, title="Help & Shortcuts", border_style="cyan"))
+        input("\nPress Enter to continue...")
                 
     def _show_loading(self):
          with Progress(

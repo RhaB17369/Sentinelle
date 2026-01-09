@@ -22,6 +22,10 @@ class ModuleRegistry:
             ModuleDefinition("hunter", "AI Threat Hunter", "✓ Ready", "8200", "run_ai_threat_hunter"),
             ModuleDefinition("predictor", "Attack Predictor", "✓ Ready", "NSA", "run_attack_predictor"),
             ModuleDefinition("persona", "Persona Profiler", "✓ Ready", "CIA", "run_persona_profiler"),
+            ModuleDefinition("domain", "Domain Recon", "✓ Ready", "OSINT", "run_domain_collector"),
+            ModuleDefinition("ip", "IP Intelligence", "✓ Ready", "OSINT", "run_ip_collector"),
+            ModuleDefinition("person", "Person OSINT", "✓ Ready", "OSINT", "run_person_collector"),
+            ModuleDefinition("netscan", "Network Scanner", "⚠️ ACTIVE", "RED", "run_network_scanner"),
             ModuleDefinition("malware", "Malware Genome", "⏳ Dev", "8200", "run_malware_genome"),
         ]
 
@@ -32,6 +36,12 @@ class ModuleRegistry:
         # adjusting for 1-based index from menu
         if 0 <= index < len(self.modules):
             return self.modules[index]
+        return None
+
+    def get_by_id(self, module_id: str) -> Optional[ModuleDefinition]:
+        for mod in self.modules:
+            if mod.id == module_id:
+                return mod
         return None
 
 registry = ModuleRegistry()
