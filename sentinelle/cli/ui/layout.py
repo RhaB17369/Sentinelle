@@ -11,7 +11,7 @@ def create_dashboard() -> Layout:
     layout = Layout()
     
     layout.split_column(
-        Layout(name="header", size=3),
+        Layout(name="header", size=12),
         Layout(name="body"),
         Layout(name="footer", size=3),
     )
