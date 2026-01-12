@@ -37,12 +37,12 @@ class App:
                 continue
                 
             module_def = None
-            if choice_lower == "a":
-                module_def = registry.get_by_id("apt")
-            elif choice_lower == "b":
-                module_def = registry.get_by_id("blockchain")
-            elif choice_lower == "t":
-                module_def = registry.get_by_id("traffic")
+            if choice_lower == "e":
+                module_def = registry.get_by_id("email")
+            elif choice_lower == "p":
+                module_def = registry.get_by_id("phone")
+            elif choice_lower == "i":
+                module_def = registry.get_by_id("ip")
             else:
                 try:
                     idx = int(choice) - 1
@@ -70,10 +70,12 @@ class App:
         table = Table(box=box.MINIMAL)
         table.add_column("Key", style="cyan")
         table.add_column("Action", style="white")
-        table.add_row("1-15", "Run specific module")
-        table.add_row("A", "Quick run: APT Attribution")
-        table.add_row("B", "Quick run: Blockchain Intel")
-        table.add_row("T", "Quick run: Traffic Analysis")
+        table.add_row("1", "Email OSINT (Holehe)")
+        table.add_row("2", "Phone Intelligence")
+        table.add_row("3", "IP Intelligence")
+        table.add_row("E", "Quick run: Email OSINT")
+        table.add_row("P", "Quick run: Phone Intel")
+        table.add_row("I", "Quick run: IP Intel")
         table.add_row("H", "Show this help screen")
         table.add_row("Q", "Quit application")
         

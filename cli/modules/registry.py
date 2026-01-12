@@ -12,21 +12,9 @@ class ModuleDefinition:
 class ModuleRegistry:
     def __init__(self):
         self.modules: List[ModuleDefinition] = [
-            ModuleDefinition("apt", "APT Attribution", "✓ Ready", "NSA", "run_apt_attribution"),
-            ModuleDefinition("traffic", "Traffic Analysis", "✓ Ready", "NSA", "run_traffic_analysis"),
-            ModuleDefinition("blockchain", "Blockchain Intel", "✓ Ready", "CIA", "run_blockchain_intel"),
-            ModuleDefinition("steg", "Steganalysis", "✓ Ready", "8200", "run_steganalysis"),
-            ModuleDefinition("sigint", "Passive SIGINT", "✓ Ready", "GCHQ", "run_passive_sigint"),
-            ModuleDefinition("deanon", "De-anonymization", "✓ Ready", "NSA", "run_deanonymization"),
-            ModuleDefinition("bio", "Behavioral Bio", "✓ Ready", "CIA", "run_behavioral_biometrics"),
-            ModuleDefinition("hunter", "AI Threat Hunter", "✓ Ready", "8200", "run_ai_threat_hunter"),
-            ModuleDefinition("predictor", "Attack Predictor", "✓ Ready", "NSA", "run_attack_predictor"),
-            ModuleDefinition("persona", "Persona Profiler", "✓ Ready", "CIA", "run_persona_profiler"),
-            ModuleDefinition("domain", "Domain Recon", "✓ Ready", "OSINT", "run_domain_collector"),
-            ModuleDefinition("ip", "IP Intelligence", "✓ Ready", "OSINT", "run_ip_collector"),
-            ModuleDefinition("person", "Person OSINT", "✓ Ready", "OSINT", "run_person_collector"),
-            ModuleDefinition("netscan", "Network Scanner", "⚠️ ACTIVE", "RED", "run_network_scanner"),
-            ModuleDefinition("malware", "Malware Genome", "⏳ Dev", "8200", "run_malware_genome"),
+            ModuleDefinition("email", "Email OSINT (Holehe v1.61)", "✓ Operational", "OSINT", "run_email_osint"),
+            ModuleDefinition("phone", "Phone Intelligence", "✓ Operational", "OSINT", "run_phone_collector"),
+            ModuleDefinition("ip", "IP Intelligence", "✓ Operational", "OSINT", "run_ip_collector"),
         ]
 
     def get_all(self) -> List[ModuleDefinition]:
