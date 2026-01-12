@@ -1,4 +1,24 @@
+import os
 import time
+from pathlib import Path
+
+# Import and load environment variables from .env file
+try:
+    from dotenv import load_dotenv
+    env_path = Path(__file__).parent.parent.parent / '.env'
+    if env_path.exists():
+        load_dotenv(env_path, override=False)
+except ImportError:
+    # If python-dotenv is not installed, manually load .env
+    env_path = Path(__file__).parent.parent.parent / '.env'
+    if env_path.exists():
+        with open(env_path, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#') and '=' in line:
+                    key, value = line.split('=', 1)
+                    os.environ[key.strip()] = value.strip().strip('"\'')
+
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from .state import state
 from ..ui.renderer import Renderer
@@ -13,6 +33,9 @@ class App:
     def start(self):
         self.renderer.clear()
         self._show_loading()
+        
+        # Check and warn about missing API keys
+        self._check_api_keys()
         
         # Main loop
         while True:
@@ -82,6 +105,19 @@ class App:
         self.renderer.console.print(Panel(table, title="Help & Shortcuts", border_style="cyan"))
         input("\nPress Enter to continue...")
                 
+    def _check_api_keys(self):
+        """Check for required API keys and warn if missing"""
+        missing_keys = []
+        if not os.getenv('OPENCAGE_API_KEY'):
+            missing_keys.append('OPENCAGE_API_KEY (Phone Intelligence GPS)')
+        
+        if missing_keys:
+            self.renderer.print_message("\n[yellow]⚠️  Missing API Keys:[/]")
+            for key in missing_keys:
+                self.renderer.print_message(f"  • {key}")
+            self.renderer.print_message("[dim]Set them in .env file or environment variables[/]\n")
+            input("Press Enter to continue...")
+    
     def _show_loading(self):
          with Progress(
             SpinnerColumn(),
