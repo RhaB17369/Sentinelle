@@ -1,10 +1,37 @@
 import time
 import os
+import sys
+import re
+from io import StringIO
 from rich.console import Console
 from rich.table import Table
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich import box
 from ..core.state import state
+
+# Import engine_mail_collector functions
+try:
+    from engine_mail_collector.core import (
+        is_email, 
+        print_result as email_print_result,
+        import_submodules,
+        get_functions,
+        launch_module,
+        maincore as email_maincore
+    )
+    import engine_mail_collector.core as email_core
+    EMAIL_OSINT_AVAILABLE = True
+except ImportError as e:
+    EMAIL_OSINT_AVAILABLE = False
+    email_core = None
+
+# Async support
+try:
+    import trio
+    import httpx
+    ASYNC_AVAILABLE = True
+except ImportError:
+    ASYNC_AVAILABLE = False
 
 
 class ModuleRunner:
@@ -14,90 +41,152 @@ class ModuleRunner:
         self.console = console
     
     # ═══════════════════════════════════════════════════════════════════════════════
-    # MODULE 1: EMAIL OSINT (Holehe v1.61)
+    # MODULE 1: EMAIL OSINT (Holehe v1.61 via engine_mail_collector)
     # ═══════════════════════════════════════════════════════════════════════════════
     
     def run_email_osint(self):
-        """Email OSINT using Holehe v1.61 - Check email on 150+ platforms"""
-        from intelligence.email_osint import EmailOSINT
+        """Email OSINT using engine_mail_collector (Holehe v1.61) - Check email on 150+ platforms"""
         
-        self.console.print("\n[bold cyan]═══════════════════════════════════════[/]")
-        self.console.print("[bold cyan]  EMAIL OSINT - Holehe v1.61 Integration  [/]")
-        self.console.print("[bold cyan]═══════════════════════════════════════[/]\n")
-        self.console.print("[dim]Checks 150+ platforms for email registration[/]")
-        self.console.print("[dim]Includes: GitHub, LinkedIn, Twitter, Facebook, etc.[/]\n")
-        
-        email = input("📧 Enter email address: ").strip()
-        
-        if not email or '@' not in email:
-            self.console.print("[red]❌ Invalid email address[/]")
+        if not EMAIL_OSINT_AVAILABLE:
+            self.console.print("[red]❌ Email OSINT module not available[/]")
+            self.console.print("[dim]Missing dependencies: engine_mail_collector, httpx, trio[/]")
             self._pause()
             return
         
-        osint = EmailOSINT()
+        self.console.print("\n[bold cyan]═══════════════════════════════════════[/]")
+        self.console.print("[bold cyan]  EMAIL OSINT - Holehe v1.61           [/]")
+        self.console.print("[bold cyan]═══════════════════════════════════════[/]\n")
+        self.console.print("[dim]Analyzes 150+ platforms for email registration[/]")
+        self.console.print("[dim]Detects: GitHub, LinkedIn, Twitter, Discord, etc.[/]\n")
         
-        self.console.print(f"\n[yellow]⏳ Scanning 150+ platforms for {email}...[/]")
-        self.console.print("[dim]This may take 10-15 seconds[/]\n")
+        email = input("📧 Enter email address: ").strip()
         
-        with Progress(SpinnerColumn(), TextColumn("[cyan]Checking platforms..."), console=self.console) as progress:
-            task = progress.add_task("", total=None)
-            report = osint.run_full_reconnaissance(email)
+        if not email:
+            self.console.print("[red]❌ No email provided[/]")
+            self._pause()
+            return
         
-        self.console.print(f"\n[bold green]═══════════════════════════════════════[/]")
-        self.console.print(f"[bold green]  REPORT: {email}  [/]")
-        self.console.print(f"[bold green]═══════════════════════════════════════[/]\n")
+        # Validate email format
+        if not is_email(email):
+            self.console.print(f"[red]❌ Invalid email format: {email}[/]")
+            self._pause()
+            return
+        
+        self.console.print(f"\n[yellow]⏳ Scanning {email} across 150+ platforms...[/]")
+        self.console.print("[dim]This may take 15-30 seconds[/]\n")
+        
+        # Run holehe scan asynchronously
+        try:
+            with Progress(SpinnerColumn(), TextColumn("[cyan]Checking platforms..."), console=self.console) as progress:
+                task = progress.add_task("", total=None)
+                
+                # Run the email scan
+                results = self._scan_email_holehe(email)
+        
+            if results:
+                self._display_email_results(email, results)
+                state.add_log(f"✓ Email OSINT completed: {email}")
+            else:
+                self.console.print("[yellow]⚠️  Scan completed but no results[/]")
+                
+        except Exception as e:
+            self.console.print(f"[red]❌ Error during scan: {str(e)}[/]")
+        
+        self._pause()
+    
+    def _scan_email_holehe(self, email: str) -> list:
+        """Run holehe scan for email across platforms"""
+        if not ASYNC_AVAILABLE:
+            self.console.print("[red]❌ Async libraries not available (httpx, trio)[/]")
+            return []
+        
+        try:
+            # Import holehe modules
+            modules = import_submodules("engine_mail_collector.modules")
+            websites = get_functions(modules, None)
+            
+            # Run async scan
+            results = []
+            
+            async def run_scan():
+                async with httpx.AsyncClient(timeout=10) as client:
+                    async with trio.open_nursery() as nursery:
+                        for website in websites:
+                            nursery.start_soon(launch_module, website, email, client, results)
+                
+                return sorted(results, key=lambda i: i.get('name', ''))
+            
+            results = trio.run(run_scan)
+            return results
+            
+        except Exception as e:
+            self.console.print(f"[dim]Scan error: {str(e)}[/]")
+            return []
+    
+    def _display_email_results(self, email: str, results: list):
+        """Display email OSINT results"""
+        
+        # Filter results
+        accounts_found = [r for r in results if r.get('exists') == True]
+        errors = [r for r in results if r.get('error') == True]
+        rate_limits = [r for r in results if r.get('rateLimit') == True]
+        
+        # Header
+        self.console.print(f"\n[bold green]{'═' * 50}[/]")
+        self.console.print(f"[bold green]  📧 EMAIL SCAN REPORT: {email}[/]")
+        self.console.print(f"[bold green]{'═' * 50}[/]\n")
+        
+        # Summary stats
+        summary_table = Table(box=box.SIMPLE)
+        summary_table.add_row("Total Platforms Checked", str(len(results)))
+        summary_table.add_row("[green]Accounts Found", f"[green]{len(accounts_found)}")
+        summary_table.add_row("[yellow]Rate Limited", f"[yellow]{len(rate_limits)}")
+        summary_table.add_row("[red]Errors", f"[red]{len(errors)}")
+        self.console.print(summary_table)
         
         # Accounts found
-        accounts = report.get('accounts_found', [])
-        if accounts:
-            self.console.print(f"[bold green]✓ Found {len(accounts)} accounts:[/]\n")
-            table = Table(title=f"Detected Accounts ({len(accounts)})", box=box.ROUNDED)
-            table.add_column("Platform", style="cyan", width=20)
-            table.add_column("Domain", style="green", width=25)
-            table.add_column("Additional Info", style="dim white")
+        if accounts_found:
+            self.console.print(f"\n[bold green]✓ DETECTED ACCOUNTS ({len(accounts_found)}):[/]\n")
+            accounts_table = Table(title="Platforms with Active Accounts", box=box.ROUNDED)
+            accounts_table.add_column("Platform", style="cyan", width=20)
+            accounts_table.add_column("Domain", style="green", width=25)
+            accounts_table.add_column("Additional Info", style="dim white", width=30)
             
-            for account in accounts[:50]:  # Show first 50
+            for result in accounts_found[:50]:
                 add_info = ""
-                if account.get('emailrecovery'):
-                    add_info += f"Recovery: {account['emailrecovery']}"
-                if account.get('phoneNumber'):
+                if result.get('emailrecovery'):
+                    add_info += f"Recovery: {result['emailrecovery']}"
+                if result.get('phoneNumber'):
                     if add_info:
                         add_info += " | "
-                    add_info += f"Phone: {account['phoneNumber']}"
+                    add_info += f"Phone: {result['phoneNumber']}"
+                if result.get('others') and isinstance(result['others'], dict):
+                    if 'FullName' in result['others']:
+                        if add_info:
+                            add_info += " | "
+                        add_info += f"Name: {result['others']['FullName']}"
                 
-                table.add_row(
-                    account.get('platform', 'unknown'),
-                    account.get('domain', 'unknown'),
+                accounts_table.add_row(
+                    result.get('name', 'unknown'),
+                    result.get('domain', 'unknown'),
                     add_info or "—"
                 )
             
-            self.console.print(table)
+            self.console.print(accounts_table)
             
-            if len(accounts) > 50:
-                self.console.print(f"\n[dim]... and {len(accounts) - 50} more accounts[/]")
+            if len(accounts_found) > 50:
+                self.console.print(f"\n[dim]... and {len(accounts_found) - 50} more accounts[/]")
         else:
-            self.console.print("[yellow]⚠️  No accounts detected on checked platforms[/]")
+            self.console.print("[yellow]⚠️  No accounts detected on scanned platforms[/]\n")
         
-        # Breaches
-        breaches = report.get('breaches', {})
-        if breaches.get('total_breaches', 0) > 0:
-            self.console.print(f"\n[bold red]⚠️  BREACH EXPOSURE DETECTED[/]")
-            self.console.print(f"[bold red]Found in {breaches['total_breaches']} breaches:[/]\n")
-            for breach in breaches.get('breaches', []):
-                self.console.print(f"  • [red]{breach.get('source')}[/]: {breach.get('count')} occurrences ({breach.get('severity')})")
-        else:
-            self.console.print(f"\n[bold green]✓ No known breach exposure[/]")
+        # Rate limits
+        if rate_limits:
+            self.console.print(f"\n[yellow]⚠️  Rate Limited on {len(rate_limits)} platforms (retry later)[/]")
         
-        # Metadata
-        metadata = report.get('metadata', {})
-        if metadata:
-            self.console.print(f"\n[bold]Email Metadata:[/]")
-            self.console.print(f"  Provider: [cyan]{metadata.get('provider_type', 'N/A')}[/]")
-            if metadata.get('mx_records'):
-                self.console.print(f"  MX Records: {', '.join(metadata['mx_records'][:3])}")
-        
-        state.add_log(f"✓ Email OSINT: {email} ({len(accounts)} accounts)")
-        self._pause()
+        # Errors
+        if errors:
+            self.console.print(f"\n[red]❌ Errors on {len(errors)} platforms (API/network issues)[/]")
+
     
     # ═══════════════════════════════════════════════════════════════════════════════
     # MODULE 2: PHONE INTELLIGENCE

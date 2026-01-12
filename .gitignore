@@ -1,3 +1,4 @@
+*.txt
 
 .env
 .env.*
@@ -61,6 +62,7 @@ logs/
 *.trace
 *.dump
 *.pid
+
 
 
 *~
