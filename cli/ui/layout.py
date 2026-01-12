@@ -40,6 +40,6 @@ def create_dashboard() -> Layout:
     footer_text.append("[T]raffic ", style="cyan")
     footer_text.append("[H]elp", style="cyan")
     
-    layout["footer"].update(Panel(footer_text, style="white on blue"))
+    layout["footer"].update(Panel(footer_text))
     
     return layout
