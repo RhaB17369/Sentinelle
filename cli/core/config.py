@@ -1,7 +1,7 @@
 from rich import box
 
 class UIConfig:
-    HEADER_STYLE = "bold white on blue"
+    HEADER_STYLE = ""
     BORDER_STYLE = "cyan"
     TITLE_STYLE = "bold cyan"
     BOX_STYLE = box.ROUNDED
