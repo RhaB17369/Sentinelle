@@ -1,5 +1,6 @@
 # SENTINNELLE Security Documentation
 
+
 ## Security Model
 
 SENTINNELLE is designed with **security-by-construction** and **defense-in-depth** principles.
