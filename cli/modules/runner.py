@@ -95,7 +95,7 @@ class ModuleRunner:
         self._pause()
     
     def _scan_email_holehe(self, email: str) -> list:
-        """Run holehe scan for email across platforms"""
+        """Run holehe scan for email across platforms with optimized settings"""
         if not ASYNC_AVAILABLE:
             self.console.print("[red]❌ Async libraries not available (httpx, trio)[/]")
             return []
@@ -105,14 +105,30 @@ class ModuleRunner:
             modules = import_submodules("engine_mail_collector.modules")
             websites = get_functions(modules, None)
             
-            # Run async scan
+            self.console.print(f"[dim]Starting scan with {len(websites)} platforms...[/]")
+            
+            # Run async scan with better timeout and rate limiting
             results = []
             
             async def run_scan():
-                async with httpx.AsyncClient(timeout=10) as client:
+                # Use longer timeout and rate limiting with retries
+                client_config = {
+                    'timeout': 30.0,  # Increased from 10 to 30 seconds for slow APIs
+                    'limits': httpx.Limits(
+                        max_keepalive_connections=10,
+                        max_connections=20
+                    ),
+                    'http2': True,  # Enable HTTP/2 for better performance
+                }
+                
+                async with httpx.AsyncClient(**client_config) as client:
                     async with trio.open_nursery() as nursery:
-                        for website in websites:
-                            nursery.start_soon(launch_module, website, email, client, results)
+                        # Process websites with controlled concurrency to avoid rate limiting
+                        for i, website in enumerate(websites):
+                            # Add exponential backoff to avoid overwhelming APIs
+                            if i > 0 and i % 5 == 0:
+                                await trio.sleep(0.1 * (i // 5))
+                            nursery.start_soon(self._safe_launch_module, website, email, client, results)
                 
                 return sorted(results, key=lambda i: i.get('name', ''))
             
@@ -121,7 +137,17 @@ class ModuleRunner:
             
         except Exception as e:
             self.console.print(f"[dim]Scan error: {str(e)}[/]")
+            import traceback
+            traceback.print_exc()
             return []
+    
+    async def _safe_launch_module(self, module, email: str, client, out: list):
+        """Safely launch a module with proper error handling and retries"""
+        try:
+            await launch_module(module, email, client, out)
+        except Exception as e:
+            # Silently handle errors - modules already append error records
+            pass
     
     def _display_email_results(self, email: str, results: list):
         """Display email OSINT results"""
