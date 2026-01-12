@@ -105,7 +105,19 @@ class ModuleRunner:
     
     def run_phone_collector(self):
         """Phone Intelligence - Carrier, GPS, Timezone, Type detection"""
-        from collectors.phone_collector import PhoneCollector
+        import sys
+        import importlib.util
+        
+        # Import PhoneTracer from phone location/phone_locator.py (handles space in directory name)
+        spec = importlib.util.spec_from_file_location(
+            "phone_locator",
+            "phone location/phone_locator.py"
+        )
+        phone_locator_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(phone_locator_module)
+        
+        PhoneTracer = phone_locator_module.PhoneTracer
+        format_result_table = phone_locator_module.format_result_table
         
         self.console.print("\n[bold cyan]═════════════════════════════════════════[/]")
         self.console.print("[bold cyan]    PHONE INTELLIGENCE (OSINT)        [/]")
@@ -118,27 +130,39 @@ class ModuleRunner:
             self._pause()
             return
         
-        collector = PhoneCollector()
+        tracer = PhoneTracer()
         
         self.console.print(f"\n[yellow]Analyzing {phone}...[/]\n")
         with Progress(SpinnerColumn(), TextColumn("[cyan]Processing..."), console=self.console) as progress:
             progress.add_task("", total=None)
-            result = collector.collect(phone)
+            result = tracer.trace_phone(phone)
         
-        table = Table(box=box.ROUNDED)
-        table.add_column("Property", style="cyan", width=20)
-        table.add_column("Value", style="green")
+        # Display formatted result
+        output = format_result_table(result)
+        self.console.print(output)
         
-        if result.get('carrier'):
-            table.add_row("Carrier", f"[cyan]{result['carrier']}[/]")
-        if result.get('location'):
-            table.add_row("Location", result['location'])
-        if result.get('type'):
-            table.add_row("Type", result['type'])
-        if result.get('timezone'):
-            table.add_row("Timezone", ', '.join(result['timezone']))
+        # Additional details if valid
+        if result.is_valid:
+            table = Table(box=box.ROUNDED)
+            table.add_column("Property", style="cyan", width=20)
+            table.add_column("Value", style="green")
+            
+            if result.carrier:
+                table.add_row("Carrier", f"[cyan]{result.carrier}[/]")
+            if result.location:
+                table.add_row("Location", result.location)
+            if result.number_type:
+                table.add_row("Type", result.number_type)
+            if result.country:
+                table.add_row("Country Code", result.country)
+            if result.gps_coordinates:
+                coords = result.gps_coordinates
+                table.add_row("GPS Coordinates", f"[yellow]{coords['lat']:.4f}, {coords['lng']:.4f}[/]")
+            
+            if table.rows:
+                self.console.print("\n")
+                self.console.print(table)
         
-        self.console.print(table)
         state.add_log(f"✓ Phone OSINT: {phone}")
         self._pause()
     
