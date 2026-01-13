@@ -9,7 +9,7 @@ requests>=2.28.0
 ipwhois>=1.2.0
 
 # Async and HTTP
-httpx>=0.24.0
+httpx[http2]>=0.24.0
 trio>=0.22.0
 
 # UI and Display
