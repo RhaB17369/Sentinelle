@@ -75,6 +75,9 @@ class ModuleRunner:
         self.console.print(f"\n[yellow]⏳ Scanning {email} across 150+ platforms...[/]")
         self.console.print("[dim]This may take 15-30 seconds[/]\n")
         
+        # Start time
+        start_time = time.time()
+        
         # Run holehe scan asynchronously
         try:
             with Progress(SpinnerColumn(), TextColumn("[cyan]Checking platforms..."), console=self.console) as progress:
@@ -84,7 +87,7 @@ class ModuleRunner:
                 results = self._scan_email_holehe(email)
         
             if results:
-                self._display_email_results(email, results)
+                self._display_email_results(email, results, start_time)
                 state.add_log(f"✓ Email OSINT completed: {email}")
             else:
                 self.console.print("[yellow]⚠️  Scan completed but no results[/]")
@@ -118,7 +121,6 @@ class ModuleRunner:
                         max_keepalive_connections=10,
                         max_connections=20
                     ),
-                    'http2': True,  # Enable HTTP/2 for better performance
                 }
                 
                 async with httpx.AsyncClient(**client_config) as client:
@@ -149,69 +151,45 @@ class ModuleRunner:
             # Silently handle errors - modules already append error records
             pass
     
-    def _display_email_results(self, email: str, results: list):
-        """Display email OSINT results"""
+    def _display_email_results(self, email: str, results: list, start_time: float):
+        """Display email OSINT results in holehe format"""
         
-        # Filter results
-        accounts_found = [r for r in results if r.get('exists') == True]
-        errors = [r for r in results if r.get('error') == True]
-        rate_limits = [r for r in results if r.get('rateLimit') == True]
+        # Header matching holehe style
+        padding = "*" * 34
+        self.console.print(f"\n[bold]{padding} {email} {padding}[/]\n")
         
-        # Header
-        self.console.print(f"\n[bold green]{'═' * 50}[/]")
-        self.console.print(f"[bold green]  📧 EMAIL SCAN REPORT: {email}[/]")
-        self.console.print(f"[bold green]{'═' * 50}[/]\n")
-        
-        # Summary stats
-        summary_table = Table(box=box.SIMPLE)
-        summary_table.add_row("Total Platforms Checked", str(len(results)))
-        summary_table.add_row("[green]Accounts Found", f"[green]{len(accounts_found)}")
-        summary_table.add_row("[yellow]Rate Limited", f"[yellow]{len(rate_limits)}")
-        summary_table.add_row("[red]Errors", f"[red]{len(errors)}")
-        self.console.print(summary_table)
-        
-        # Accounts found
-        if accounts_found:
-            self.console.print(f"\n[bold green]✓ DETECTED ACCOUNTS ({len(accounts_found)}):[/]\n")
-            accounts_table = Table(title="Platforms with Active Accounts", box=box.ROUNDED)
-            accounts_table.add_column("Platform", style="cyan", width=20)
-            accounts_table.add_column("Domain", style="green", width=25)
-            accounts_table.add_column("Additional Info", style="dim white", width=30)
-            
-            for result in accounts_found[:50]:
-                add_info = ""
-                if result.get('emailrecovery'):
-                    add_info += f"Recovery: {result['emailrecovery']}"
-                if result.get('phoneNumber'):
-                    if add_info:
-                        add_info += " | "
-                    add_info += f"Phone: {result['phoneNumber']}"
-                if result.get('others') and isinstance(result['others'], dict):
-                    if 'FullName' in result['others']:
-                        if add_info:
-                            add_info += " | "
-                        add_info += f"Name: {result['others']['FullName']}"
+        # Platforms list
+        for r in results:
+            domain = r.get('domain', 'unknown')
+            if r.get('exists'):
+                toprint = ""
+                if r.get('emailrecovery'):
+                    toprint += f" {r['emailrecovery']}"
+                if r.get('phoneNumber'):
+                    toprint += f" / {r['phoneNumber']}"
+                if r.get('others') and isinstance(r['others'], dict):
+                    if 'FullName' in r['others']:
+                        toprint += f" / FullName {r['others']['FullName']}"
                 
-                accounts_table.add_row(
-                    result.get('name', 'unknown'),
-                    result.get('domain', 'unknown'),
-                    add_info or "—"
-                )
-            
-            self.console.print(accounts_table)
-            
-            if len(accounts_found) > 50:
-                self.console.print(f"\n[dim]... and {len(accounts_found) - 50} more accounts[/]")
-        else:
-            self.console.print("[yellow]⚠️  No accounts detected on scanned platforms[/]\n")
+                self.console.print(f"[bold green][+] {domain}{toprint}[/]")
+            elif r.get('rateLimit'):
+                self.console.print(f"[bold yellow][x] {domain}[/]")
+            elif r.get('error'):
+                self.console.print(f"[bold red][!] {domain}[/]")
+            else:
+                self.console.print(f"[bold magenta][-] {domain}[/]")
         
-        # Rate limits
-        if rate_limits:
-            self.console.print(f"\n[yellow]⚠️  Rate Limited on {len(rate_limits)} platforms (retry later)[/]")
+        # Legend
+        self.console.print(f"\n[bold green][+] Email used[/], [bold magenta][-] Email not used[/], [bold yellow][x] Rate limit[/], [bold red][!] Error[/]")
         
-        # Errors
-        if errors:
-            self.console.print(f"\n[red]❌ Errors on {len(errors)} platforms (API/network issues)[/]")
+        # Summary
+        elapsed = round(time.time() - start_time, 2)
+        self.console.print(f"\n[bold]{len(results)} websites checked in {elapsed} seconds[/]")
+        
+        # Credits
+        self.console.print("\n[dim]Twitter : @palenath[/]")
+        self.console.print("[dim]Github : https://github.com/megadose/holehe[/]")
+        self.console.print("[dim]For BTC Donations : 1FHDM49QfZX6pJmhjLE5tB2K6CaTLMZpXZ[/]\n")
 
     
     # ═══════════════════════════════════════════════════════════════════════════════
