@@ -10,6 +10,7 @@
 *.pfx
 *.der
 *.jks
+*.keystore
 secrets/
 credentials/
 tokens/
@@ -83,8 +84,21 @@ ehthumbs.db
 Desktop.ini
 
 
-./zencoder/
-!.zencoder/rules
+.zencoder/
+zencoder/
+**/.zencoder/
+**/zencoder/
+.cursor/
+.cursor-cache/
+.copilot/
+.github/copilot/
+.codeium/
+.tabnine/
+.ai/
+.llm/
+.llms/
+.prompts/
+.prompt_cache/
 .vscode/
 !.vscode/extensions.json
 
