@@ -9,6 +9,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.live import Live
 from rich.panel import Panel
 from rich.layout import Layout
+from rich import box
 from ..core.state import state
 
 # Import engine_mail_collector functions
@@ -179,32 +180,7 @@ class ModuleRunner:
             pass
     
     def _display_email_results(self, email: str, results: list, start_time: float):
-        """Display email OSINT results in holehe format"""
-        
-        # Header matching holehe style
-        padding = "*" * 34
-        self.console.print(f"\n[bold]{padding} {email} {padding}[/]\n")
-        
-        # Platforms list
-        for r in results:
-            domain = r.get('domain', 'unknown')
-            if r.get('exists'):
-                toprint = ""
-                if r.get('emailrecovery'):
-                    toprint += f" {r['emailrecovery']}"
-                if r.get('phoneNumber'):
-                    toprint += f" / {r['phoneNumber']}"
-                if r.get('others') and isinstance(r['others'], dict):
-                    if 'FullName' in r['others']:
-                        toprint += f" / FullName {r['others']['FullName']}"
-                
-                self.console.print(f"[bold green][+] {domain}{toprint}[/]")
-            elif r.get('rateLimit'):
-                self.console.print(f"[bold yellow][x] {domain}[/]")
-            elif r.get('error'):
-                self.console.print(f"[bold red][!] {domain}[/]")
-            else:
-                self.console.print(f"[bold magenta][-] {domain}[/]")
+        """Display email OSINT summary and credits (list is already shown in dynamic table)"""
         
         # Legend
         self.console.print(f"\n[bold green][+] Email used[/], [bold magenta][-] Email not used[/], [bold yellow][x] Rate limit[/], [bold red][!] Error[/]")
@@ -278,16 +254,18 @@ class ModuleRunner:
             if result.location:
                 table.add_row("Location", result.location)
             
+            # Always show GPS section if valid, showing coordinates or error/status
             if result.gps_coordinates:
                 gps = result.gps_coordinates
-                lat = gps.get('lat', 'N/A')
-                lng = gps.get('lng', 'N/A')
-                if lat != 'N/A' and lng != 'N/A':
-                    table.add_row("📍 GPS Latitude", f"[yellow]{lat:.6f}[/]")
-                    table.add_row("📍 GPS Longitude", f"[yellow]{lng:.6f}[/]")
-                    table.add_row("📍 Coordinates", f"[yellow]{lat:.4f}, {lng:.4f}[/]")
-                else:
-                    table.add_row("📍 GPS", "[dim]Set OPENCAGE_API_KEY for coordinates[/]")
+                lat = gps.get('lat', 0)
+                lng = gps.get('lng', 0)
+                table.add_row("📍 GPS Latitude", f"{lat:.6f}")
+                table.add_row("📍 GPS Longitude", f"{lng:.6f}")
+                table.add_row("📍 Coordinates", f"[yellow]{lat:.4f}, {lng:.4f}[/]")
+            else:
+                # If no coordinates, show why
+                reason = result.geocoding_error or "Not available"
+                table.add_row("📍 GPS Status", f"[dim]{reason}[/]")
             
             self.console.print(table)
         
