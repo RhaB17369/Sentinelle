@@ -200,61 +200,70 @@ class ModuleRunner:
     # ═══════════════════════════════════════════════════════════════════════════════
     
     def run_phone_collector(self):
-        """Phone Intelligence - Carrier, GPS, Timezone, Type detection"""
-        import os
-        from phone_location.phone_locator import PhoneTracer, format_result_table
+        """Phone Intelligence - Carrier, GPS, Timezone with Dynamic UI"""
+        from phone_location.phone_locator import PhoneTracer
+        from rich.console import Group
         
         self.console.print("\n[bold cyan]═══════════════════════════════════════[/]")
         self.console.print("[bold cyan]    PHONE INTELLIGENCE (OSINT)        [/]")
         self.console.print("[bold cyan]═══════════════════════════════════════[/]\n")
-        self.console.print("[dim]Analyzes international phone numbers[/]")
-        self.console.print("[dim]Detects: Carrier, Location, GPS, Timezone, Type[/]\n")
         
-        phone = input("📱 Enter phone number (with country code, e.g., +33612345678): ").strip()
-        
+        phone = input("📱 Enter phone number (with country code): ").strip()
         if not phone:
             self.console.print("[red]❌ No phone number provided[/]")
             self._pause()
             return
         
-        # Get API key from environment and pass it to PhoneTracer
+        # Setup Dynamic UI
+        progress = Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            console=self.console
+        )
+        
+        table = Table(box=box.ROUNDED, expand=True)
+        table.add_column("Property", style="cyan", width=20)
+        table.add_column("Value", style="green")
+        
         api_key = os.getenv('OPENCAGE_API_KEY')
         tracer = PhoneTracer(opencage_api_key=api_key)
         
-        self.console.print(f"\n[yellow]⏳ Analyzing {phone}...[/]\n")
-        
-        with Progress(SpinnerColumn(), TextColumn("[cyan]Processing..."), console=self.console) as progress:
-            task = progress.add_task("", total=None)
+        with Live(Panel(Group(progress, table), title=f"Analyzing: {phone}"), console=self.console) as live:
+            task = progress.add_task("Gathering intelligence...", total=4)
+            
+            # Step 1: Basic Info & Validation
+            progress.update(task, description="Validating number...")
             result = tracer.trace_phone(phone)
-        
-        # Display formatted result first
-        self.console.print(format_result_table(result))
-        
-        # If valid, show detailed table
-        if result.is_valid:
-            self.console.print("\n[bold cyan]═══════════════════════════════════════[/]\n")
+            time.sleep(0.5) # Slight delay for visual effect
+            progress.advance(task)
             
-            table = Table(box=box.ROUNDED)
-            table.add_column("Property", style="cyan", width=20)
-            table.add_column("Value", style="green")
+            if not result.is_valid:
+                live.update(Panel(f"[red]❌ Error: {result.error or 'Invalid number'}[/]", title="Analysis Failed"))
+                self._pause()
+                return
+
+            if result.country: table.add_row("Country Code", result.country)
+            if result.region: table.add_row("Region", result.region)
             
-            if result.country:
-                table.add_row("Country Code", result.country)
-            
-            if result.region:
-                table.add_row("Region", result.region)
-            
+            # Step 2: Carrier
+            progress.update(task, description="Fetching carrier info...")
             if result.carrier:
                 table.add_row("Carrier", f"[cyan]{result.carrier}[/]")
-            
             if result.number_type:
                 type_icon = "📱" if "mobile" in result.number_type.lower() else "☎️"
                 table.add_row("Number Type", f"{type_icon} {result.number_type}")
+            time.sleep(0.5)
+            progress.advance(task)
             
+            # Step 3: Location
+            progress.update(task, description="Resolving location...")
             if result.location:
                 table.add_row("Location", result.location)
+            time.sleep(0.5)
+            progress.advance(task)
             
-            # Always show GPS section if valid, showing coordinates or error/status
+            # Step 4: GPS
+            progress.update(task, description="Retrieving GPS data...")
             if result.gps_coordinates:
                 gps = result.gps_coordinates
                 lat = gps.get('lat', 0)
@@ -263,12 +272,12 @@ class ModuleRunner:
                 table.add_row("📍 GPS Longitude", f"{lng:.6f}")
                 table.add_row("📍 Coordinates", f"[yellow]{lat:.4f}, {lng:.4f}[/]")
             else:
-                # If no coordinates, show why
                 reason = result.geocoding_error or "Not available"
                 table.add_row("📍 GPS Status", f"[dim]{reason}[/]")
             
-            self.console.print(table)
-        
+            progress.update(task, description="Analysis complete", completed=4)
+            time.sleep(0.3)
+            
         state.add_log(f"✓ Phone OSINT: {phone}")
         self._pause()
     
@@ -277,73 +286,79 @@ class ModuleRunner:
     # ═══════════════════════════════════════════════════════════════════════════════
     
     def run_ip_collector(self):
-        """IP Intelligence - Geolocation, ISP, ASN, WHOIS"""
+        """IP Intelligence - Geolocation, ISP, ASN, WHOIS with Dynamic UI"""
         from collectors.ip_collector import IPCollector
+        from rich.console import Group
         
         self.console.print("\n[bold cyan]═══════════════════════════════════════[/]")
         self.console.print("[bold cyan]    IP INTELLIGENCE (OSINT)          [/]")
         self.console.print("[bold cyan]═══════════════════════════════════════[/]\n")
-        self.console.print("[dim]Analyzes IP addresses[/]")
-        self.console.print("[dim]Detects: Geolocation, ISP, ASN, Type[/]\n")
         
         ip = input("🌐 Enter IP address: ").strip()
-        
         if not ip:
             self.console.print("[red]❌ No IP address provided[/]")
             self._pause()
             return
         
+        # Setup Dynamic UI
+        progress = Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            console=self.console
+        )
+        
+        table = Table(box=box.ROUNDED, expand=True)
+        table.add_column("Category", style="cyan", width=20)
+        table.add_column("Property", style="dim", width=20)
+        table.add_column("Value", style="green")
+        
         collector = IPCollector()
         
-        self.console.print(f"\n[yellow]⏳ Analyzing {ip}...[/]\n")
-        
-        with Progress(SpinnerColumn(), TextColumn("[cyan]Processing..."), console=self.console) as progress:
-            task = progress.add_task("", total=None)
+        with Live(Panel(Group(progress, table), title=f"Analyzing IP: {ip}"), console=self.console) as live:
+            task = progress.add_task("Collecting intelligence...", total=5)
+            
+            # Step 1: Initialize and Basic check
+            progress.update(task, description="Querying provider databases...")
             result = collector.collect(ip)
-        
-        self.console.print(f"\n[bold green]═══════════════════════════════════════[/]")
-        self.console.print(f"[bold green]  IP ANALYSIS: {ip}  [/]")
-        self.console.print(f"[bold green]═══════════════════════════════════════[/]\n")
-        
-        # IP Type
-        ip_type = result.get('type', 'unknown')
-        type_color = "cyan" if ip_type == "public" else "yellow"
-        self.console.print(f"[bold]Type:[/] [{type_color}]{ip_type.upper()}[/]\n")
-        
-        # Geolocation
-        if result.get('geolocation'):
-            geo = result['geolocation']
-            self.console.print("[bold]📍 Geolocation:[/]")
-            self.console.print(f"  Country: [cyan]{geo.get('country')}[/]")
-            self.console.print(f"  City: {geo.get('city', 'N/A')}")
-            self.console.print(f"  Region: {geo.get('region', 'N/A')}")
-            self.console.print(f"  Timezone: {geo.get('timezone', 'N/A')}")
-            self.console.print(f"  Coordinates: {geo.get('latitude', 'N/A')}, {geo.get('longitude', 'N/A')}")
-        
-        # ISP/ASN
-        if result.get('geolocation'):
-            geo = result['geolocation']
-            self.console.print(f"\n[bold]🏢 Internet Provider:[/]")
-            self.console.print(f"  ISP: [cyan]{geo.get('isp', 'N/A')}[/]")
-            self.console.print(f"  Organization: {geo.get('org', 'N/A')}")
-            self.console.print(f"  ASN: {geo.get('as', 'N/A')}")
-        
-        # Reverse DNS
-        if result.get('reverse_dns'):
-            self.console.print(f"\n[bold]🔗 Reverse DNS:[/]")
-            self.console.print(f"  Hostname: [cyan]{result['reverse_dns']}[/]")
-        
-        # WHOIS
-        if result.get('whois'):
-            whois = result['whois']
-            self.console.print(f"\n[bold]📋 WHOIS Data:[/]")
-            if whois.get('asn'):
-                self.console.print(f"  ASN: {whois['asn']}")
-            if whois.get('asn_description'):
-                self.console.print(f"  Description: {whois['asn_description']}")
-            if whois.get('asn_country_code'):
-                self.console.print(f"  Country Code: {whois['asn_country_code']}")
-        
+            time.sleep(0.5)
+            progress.advance(task)
+            
+            # Step 2: Basic Info & Type
+            progress.update(task, description="Resolving IP type...")
+            ip_type = result.get('type', 'unknown')
+            type_color = "cyan" if ip_type == "public" else "yellow"
+            table.add_row("Basic Info", "Type", f"[{type_color}]{ip_type.upper()}[/]")
+            time.sleep(0.3)
+            progress.advance(task)
+            
+            # Step 3: Geolocation
+            progress.update(task, description="Locating IP address...")
+            if result.get('geolocation'):
+                geo = result['geolocation']
+                table.add_row("Geolocation", "Country", f"[cyan]{geo.get('country')}[/]")
+                table.add_row("Geolocation", "City/Region", f"{geo.get('city', 'N/A')}, {geo.get('region', 'N/A')}")
+                table.add_row("Geolocation", "Coordinates", f"{geo.get('latitude', 'N/A')}, {geo.get('longitude', 'N/A')}")
+                
+                # Step 4: Provider Info
+                progress.update(task, description="Identifying ISP/ASN...")
+                table.add_row("Provider", "ISP", f"[cyan]{geo.get('isp', 'N/A')}[/]")
+                table.add_row("Provider", "ASN", geo.get('as', 'N/A'))
+            time.sleep(0.5)
+            progress.advance(task)
+            
+            # Step 5: Network Data (Reverse DNS & WHOIS)
+            progress.update(task, description="Analyzing network records...")
+            if result.get('reverse_dns'):
+                table.add_row("Network", "Reverse DNS", f"[cyan]{result['reverse_dns']}[/]")
+                
+            if result.get('whois'):
+                whois = result['whois']
+                if whois.get('asn_description'):
+                    table.add_row("WHOIS", "Description", whois['asn_description'])
+            
+            progress.update(task, description="Analysis complete", completed=5)
+            time.sleep(0.3)
+            
         state.add_log(f"✓ IP OSINT: {ip}")
         self._pause()
     
