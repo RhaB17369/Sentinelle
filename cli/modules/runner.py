@@ -6,7 +6,9 @@ from io import StringIO
 from rich.console import Console
 from rich.table import Table
 from rich.progress import Progress, SpinnerColumn, TextColumn
-from rich import box
+from rich.live import Live
+from rich.panel import Panel
+from rich.layout import Layout
 from ..core.state import state
 
 # Import engine_mail_collector functions
@@ -45,92 +47,115 @@ class ModuleRunner:
     # ═══════════════════════════════════════════════════════════════════════════════
     
     def run_email_osint(self):
-        """Email OSINT using engine_mail_collector (Holehe v1.61) - Check email on 150+ platforms"""
+        """Email OSINT with real-time dynamic table and progress bar"""
         
         if not EMAIL_OSINT_AVAILABLE:
             self.console.print("[red]❌ Email OSINT module not available[/]")
-            self.console.print("[dim]Missing dependencies: engine_mail_collector, httpx, trio[/]")
             self._pause()
             return
         
         self.console.print("\n[bold cyan]═══════════════════════════════════════[/]")
         self.console.print("[bold cyan]  EMAIL OSINT - Holehe v1.61           [/]")
         self.console.print("[bold cyan]═══════════════════════════════════════[/]\n")
-        self.console.print("[dim]Analyzes 150+ platforms for email registration[/]")
-        self.console.print("[dim]Detects: GitHub, LinkedIn, Twitter, Discord, etc.[/]\n")
         
         email = input("📧 Enter email address: ").strip()
-        
-        if not email:
-            self.console.print("[red]❌ No email provided[/]")
+        if not email or not is_email(email):
+            self.console.print("[red]❌ Invalid email address[/]")
             self._pause()
             return
         
-        # Validate email format
-        if not is_email(email):
-            self.console.print(f"[red]❌ Invalid email format: {email}[/]")
-            self._pause()
-            return
+        # Setup Dynamic UI components
+        progress = Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+            console=self.console
+        )
         
-        self.console.print(f"\n[yellow]⏳ Scanning {email} across 150+ platforms...[/]")
-        self.console.print("[dim]This may take 15-30 seconds[/]\n")
+        table = Table(box=box.ROUNDED, expand=True)
+        table.add_column("Status", width=10)
+        table.add_column("Domain", style="cyan")
+        table.add_column("Information", style="dim")
         
-        # Start time
+        # Results storage for final report
+        all_results = []
         start_time = time.time()
         
-        # Run holehe scan asynchronously
-        try:
-            with Progress(SpinnerColumn(), TextColumn("[cyan]Checking platforms..."), console=self.console) as progress:
-                task = progress.add_task("", total=None)
-                
-                # Run the email scan
-                results = self._scan_email_holehe(email)
-        
-            if results:
-                self._display_email_results(email, results, start_time)
-                state.add_log(f"✓ Email OSINT completed: {email}")
+        def update_ui(result):
+            all_results.append(result)
+            domain = result.get('domain', 'unknown')
+            info = ""
+            
+            if result.get('exists'):
+                status = "[bold green][+][/]"
+                if result.get('emailrecovery'): info += f"Recovery: {result['emailrecovery']}"
+                if result.get('phoneNumber'): info += f" | Phone: {result['phoneNumber']}"
+            elif result.get('rateLimit'):
+                status = "[bold yellow][x][/]"
+            elif result.get('error'):
+                status = "[bold red][!][/]"
             else:
-                self.console.print("[yellow]⚠️  Scan completed but no results[/]")
+                status = "[bold magenta][-][/]"
+            
+            # Only add to table if it's "interesting" (exists, rate limit, or error)
+            # or if you want to see everything
+            table.add_row(status, domain, info)
+
+        with Live(Panel(table, title=f"Scanning: {email}"), console=self.console, refresh_per_second=4) as live:
+            self.console.print(f"\n[yellow]⏳ Starting live scan for {email}...[/]\n")
+            
+            try:
+                # Get websites count for progress
+                modules = import_submodules("engine_mail_collector.modules")
+                websites = get_functions(modules, None)
                 
-        except Exception as e:
-            self.console.print(f"[red]❌ Error during scan: {str(e)}[/]")
+                scan_task = progress.add_task(f"Checking {len(websites)} platforms...", total=len(websites))
+                
+                # Combine table and progress in the Live display
+                live.update(Panel(
+                    Layout(progress, name="p"), 
+                    title=f"Progress: {email}"
+                ))
+                # Note: For simplicity in this layout, we'll just show the progress and then the results
+                # or we can nest them. Let's do a simple vertical layout.
+                from rich.console import Group
+                live.update(Panel(Group(progress, table), title=f"OSINT Scan: {email}"))
+
+                # Run scan
+                self._scan_email_holehe(email, on_complete=lambda r: (update_ui(r), progress.update(scan_task, advance=1)))
+                
+            except Exception as e:
+                self.console.print(f"[red]❌ Error: {str(e)}[/]")
+
+        if all_results:
+            self._display_email_results(email, all_results, start_time)
+            state.add_log(f"✓ Email OSINT completed: {email}")
         
         self._pause()
-    
-    def _scan_email_holehe(self, email: str) -> list:
+
+    def _scan_email_holehe(self, email: str, on_complete=None) -> list:
         """Run holehe scan for email across platforms with optimized settings"""
         if not ASYNC_AVAILABLE:
             self.console.print("[red]❌ Async libraries not available (httpx, trio)[/]")
             return []
         
         try:
-            # Import holehe modules
             modules = import_submodules("engine_mail_collector.modules")
             websites = get_functions(modules, None)
-            
-            self.console.print(f"[dim]Starting scan with {len(websites)} platforms...[/]")
-            
-            # Run async scan with better timeout and rate limiting
             results = []
             
             async def run_scan():
-                # Use longer timeout and rate limiting with retries
                 client_config = {
-                    'timeout': 30.0,  # Increased from 10 to 30 seconds for slow APIs
-                    'limits': httpx.Limits(
-                        max_keepalive_connections=10,
-                        max_connections=20
-                    ),
+                    'timeout': 30.0,
+                    'limits': httpx.Limits(max_keepalive_connections=10, max_connections=20),
                 }
                 
                 async with httpx.AsyncClient(**client_config) as client:
                     async with trio.open_nursery() as nursery:
-                        # Process websites with controlled concurrency to avoid rate limiting
                         for i, website in enumerate(websites):
-                            # Add exponential backoff to avoid overwhelming APIs
-                            if i > 0 and i % 5 == 0:
-                                await trio.sleep(0.1 * (i // 5))
-                            nursery.start_soon(self._safe_launch_module, website, email, client, results)
+                            if i > 0 and i % 10 == 0:
+                                await trio.sleep(0.05)
+                            nursery.start_soon(self._safe_launch_module, website, email, client, results, on_complete)
                 
                 return sorted(results, key=lambda i: i.get('name', ''))
             
@@ -138,17 +163,19 @@ class ModuleRunner:
             return results
             
         except Exception as e:
-            self.console.print(f"[dim]Scan error: {str(e)}[/]")
-            import traceback
-            traceback.print_exc()
             return []
     
-    async def _safe_launch_module(self, module, email: str, client, out: list):
+    async def _safe_launch_module(self, module, email: str, client, out: list, on_complete=None):
         """Safely launch a module with proper error handling and retries"""
         try:
+            # We need to capture what was added to 'out'
+            initial_len = len(out)
             await launch_module(module, email, client, out)
+            if on_complete and len(out) > initial_len:
+                on_complete(out[-1])
         except Exception as e:
-            # Silently handle errors - modules already append error records
+            # Handled by engine_mail_collector adding error record usually, 
+            # but if it fails completely we should ensure something is reported
             pass
     
     def _display_email_results(self, email: str, results: list, start_time: float):
