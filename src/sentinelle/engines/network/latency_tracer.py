@@ -58,11 +58,13 @@ class LatencyTracer:
             hostname = response[0].value.decode().lower()
 
             # IATA codes (LHR, CDG, FRA, JFK, etc.)
-            iata_patterns = r"\b(lhr|cdg|fra|jfk|lax|hkg|sin|ams|sfo|sea|dfw)\b"
+            iata_patterns = (r"\b(lhr|cdg|fra|jfk|lax|hkg|sin|ams|sfo|sea|"
+                             r"dfw)\b")
             iata_match = re.search(iata_patterns, hostname)
 
             # City name snippets
-            city_patterns = r"(paris|london|berlin|new-york|tokyo|madrid|milan)"
+            city_patterns = (r"(paris|london|berlin|new-york|tokyo|madrid|"
+                             r"milan)")
             city_match = re.search(city_patterns, hostname)
 
             return {
@@ -101,8 +103,10 @@ class LatencyTracer:
                     'prefix': parts[1].strip(),
                     'country': parts[2].strip(),
                     'owner': owner,
-                    'is_known_vpn': any(x in owner.lower()
-                                        for x in ['vpn', 'proxy', 'tor', 'hosting'])
+                    'is_known_vpn': any(
+                        x in owner.lower()
+                        for x in ['vpn', 'proxy', 'tor', 'hosting']
+                    )
                 }
         except Exception:
             pass
@@ -209,7 +213,8 @@ class LatencyTracer:
             return "Encapsulated/VPN Tunnel"
         return "Unknown"
 
-    async def _get_ip_id_intelligence(self, host: str, count: int = 5) -> Dict[str, Any]:
+    async def _get_ip_id_intelligence(self, host: str,
+                                      count: int = 5) -> Dict[str, Any]:
         """Analyze IP ID sequence to detect NAT or OS behavior."""
         try:
             if self._is_ipv6(host):
@@ -229,62 +234,146 @@ class LatencyTracer:
             diffs = [ids[i+1] - ids[i] for i in range(len(ids)-1)]
 
             if all(d == 0 for d in diffs):
-                return {'type': 'Constant (Likely Linux/Android)', 'values': ids}
+                return {
+                    'type': 'Constant (Likely Linux/Android)',
+                    'values': ids
+                }
             elif all(1 <= d <= 2 for d in diffs):
-                return {'type': 'Incremental (Likely Windows/Network Device)',
-                        'values': ids}
+                return {
+                    'type': 'Incremental (Likely Windows/Network Device)',
+                    'values': ids
+                }
             elif any(d < 0 for d in diffs) or \
                     statistics.stdev([float(d) for d in diffs]) > 1000:
-                return {'type': 'Random/High-Traffic (Potential NAT/Load Balancer)',
-                        'values': ids}
+                return {
+                    'type': ('Random/High-Traffic (Potential NAT/'
+                             'Load Balancer)'),
+                    'values': ids
+                }
 
             return {'type': 'Mixed', 'values': ids}
         except Exception:
             return {'type': 'Error during capture'}
 
-    async def measure_clock_skew(self, host: str, port: int = 443) -> Optional[float]:
-        """Estimate target clock skew (Hz) via TCP Timestamps."""
+    async def measure_clock_skew(self, host: str, port: int = 443,
+                                 count: int = 3) -> Optional[float]:
+        """
+        Estimate target clock skew (Hz) via TCP Timestamps.
+        Uses linear regression over multiple samples for high precision.
+        """
         try:
-            s1 = await self.tcp_ping(host, port)
-            t1_local = time.perf_counter()
-            t1_remote = s1.get('tcp_options', {}).get('ts_val')
+            samples = []
+            for _ in range(count):
+                start_time = time.perf_counter()
+                s = await self.tcp_ping(host, port)
+                t_local = time.perf_counter()
+                # Use the midpoint of the RTT for better local time estimation
+                t_local_adjusted = (start_time + t_local) / 2.0
+                t_remote = s.get('tcp_options', {}).get('ts_val')
 
-            if t1_remote is None:
+                if t_remote is not None:
+                    samples.append((t_local_adjusted, t_remote))
+
+                if _ < count - 1:
+                    await asyncio.sleep(1.0)
+
+            if len(samples) < 2:
                 return None
 
-            await asyncio.sleep(1.0)
+            # Simple linear regression (Local Time -> Remote TS)
+            n = len(samples)
+            sum_x = sum(s[0] for s in samples)
+            sum_y = sum(s[1] for s in samples)
+            sum_xy = sum(s[0] * s[1] for s in samples)
+            sum_xx = sum(s[0]**2 for s in samples)
 
-            s2 = await self.tcp_ping(host, port)
-            t2_local = time.perf_counter()
-            t2_remote = s2.get('tcp_options', {}).get('ts_val')
-
-            if t2_remote is None:
+            denominator = (n * sum_xx - sum_x**2)
+            if denominator == 0:
                 return None
 
-            remote_delta = t2_remote - t1_remote
-            local_delta = t2_local - t1_local
-            return round(remote_delta / local_delta, 2)
+            slope = (n * sum_xy - sum_x * sum_y) / denominator
+            return round(slope, 2)
+        except Exception:
+            return None
+
+    async def measure_icmp_clock_skew(self, host: str, count: int = 3) -> Optional[float]:
+        """
+        Estimate target clock skew via ICMP Timestamp Request (Type 13).
+        Stealthier alternative when TCP timestamps are blocked.
+        """
+        try:
+            samples = []
+            for _ in range(count):
+                pkt = IP(dst=host)/ICMP(type=13)
+                start_time = time.perf_counter()
+
+                loop = asyncio.get_event_loop()
+                ans = await loop.run_in_executor(
+                    None, lambda: sr1(pkt, timeout=1, verbose=0)
+                )
+
+                t_local = time.perf_counter()
+                t_local_adjusted = (start_time + t_local) / 2.0
+
+                if ans and ans.haslayer(ICMP) and ans.getlayer(ICMP).type == 14:
+                    t_remote = ans.getlayer(ICMP).ts_rx
+                    if t_remote:
+                        samples.append((t_local_adjusted, t_remote))
+
+                if _ < count - 1:
+                    await asyncio.sleep(1.0)
+
+            if len(samples) < 2:
+                return None
+
+            n = len(samples)
+            sum_x = sum(s[0] for s in samples)
+            sum_y = sum(s[1] for s in samples)
+            sum_xy = sum(s[0] * s[1] for s in samples)
+            sum_xx = sum(s[0]**2 for s in samples)
+
+            denom = (n * sum_xx - sum_x**2)
+            if denom == 0:
+                return None
+
+            slope = (n * sum_xy - sum_x * sum_y) / denom
+            return round(slope, 2)
         except Exception:
             return None
 
     def _analyze_tcp_options(self, options: List[Tuple[str, Any]]) -> Dict[str, Any]:
         """Analyze TCP Options for expert-level OS fingerprinting."""
+        opt_dict = dict(options)
         opt_names = [opt[0] for opt in options]
+        opt_sequence = ",".join(opt_names)
 
         fp = "Unknown"
-        if "Timestamp" in opt_names and "WScale" in opt_names:
-            if opt_names[1] == "SACK":
-                fp = "Linux Kernel 3.x+"
+
+        # Refined signatures based on common stack implementations
+        if "MSS" in opt_names and "SAckOK" in opt_names and "Timestamp" in opt_names:
+            if opt_sequence.startswith("MSS,SAckOK,Timestamp"):
+                fp = "Linux Kernel 3.11+"
+            elif "WScale" in opt_names:
+                fp = "Linux-based (Generic)"
+        elif "MSS" in opt_names and "NOP" in opt_names and "WScale" in opt_names:
+            if "SAckOK" in opt_names:
+                fp = "Windows 10/11"
             else:
+                fp = "Windows (Older/Server)"
+        elif "MSS" in opt_names and "WScale" in opt_names and "Timestamp" in opt_names:
+            # macOS/iOS often uses MSS, NOP, WScale, NOP, NOP, TS, SACK
+            if opt_sequence.count("NOP") >= 3:
                 fp = "iOS/macOS"
-        elif "WScale" in opt_names and "NOP" in opt_names:
-            fp = "Windows"
+
+        ts_val = None
+        if "Timestamp" in opt_dict:
+            ts_val = opt_dict["Timestamp"][0] if isinstance(opt_dict["Timestamp"], tuple) else opt_dict["Timestamp"]
 
         return {
             'fingerprint': fp,
             'options': opt_names,
-            'ts_val': next((opt[1] for opt in options
-                            if opt[0] == "Timestamp"), None)
+            'ts_val': ts_val,
+            'wscale': opt_dict.get("WScale")
         }
 
     async def ping(self, host: str, count: int = 10,
@@ -350,6 +439,9 @@ class LatencyTracer:
                 )
 
                 is_vpn = proxy_anomaly or asn_intel.get('is_known_vpn', False)
+                link_integrity = self._calculate_link_integrity(
+                    stats, jitter_profile['jitter']
+                )
 
                 result = {
                     'host': host,
@@ -358,6 +450,7 @@ class LatencyTracer:
                     'intelligence': {
                         'os': os_fp,
                         'link_medium': link_type,
+                        'link_integrity': link_integrity,
                         'is_anycast': anycast,
                         'proxy_vpn_detected': is_vpn,
                         'bufferbloat_detected': bufferbloat,
@@ -457,23 +550,72 @@ class LatencyTracer:
         if tcp_options and tcp_options.get('fingerprint') != "Unknown":
             return tcp_options['fingerprint']
 
+        # WScale and Window Size correlation
+        wscale = tcp_options.get('wscale') if tcp_options else None
+
         if not ttl:
             if win_size:
                 if win_size == 64240:
                     return "Windows (TCP-based)"
+                if win_size in [29200, 5840, 14600]:
+                    return "Linux (TCP-based)"
                 if win_size == 65535:
                     return "FreeBSD/macOS (TCP-based)"
             return "Unknown"
 
         if ttl <= 64:
+            # Linux/Android/iOS/macOS all use TTL 64
             if jitter_data.get('type', '').startswith("Mobile/Radio"):
                 return "Android/Mobile Device"
-            if win_size == 65535:
+            if win_size == 65535 or (wscale is not None and wscale in [6, 8]):
                 return "macOS/iOS"
-            return "Linux"
+            if win_size in [29200, 5840, 14600, 64240]:
+                return "Linux"
+            return "Unix/Linux Derivative"
+
         if ttl <= 128:
+            # Windows uses TTL 128
+            if win_size == 64240 or (wscale is not None and wscale == 8):
+                return "Windows 10/11"
             return "Windows"
-        return "Network Device (Cisco/Juniper)"
+
+        return "Network Device (Cisco/Juniper/F5)"
+
+    def _calculate_link_integrity(self, rtt_ms: Dict[str, float],
+                                  jitter: float) -> Dict[str, Any]:
+        """Generate a quality score based on link stability and health."""
+        score = 100.0
+        loss = rtt_ms.get('loss_pct', 0.0)
+
+        # Penalize packet loss (heavy weight)
+        score -= (loss * 1.5)
+
+        # Penalize jitter
+        score -= min(25, jitter * 1.5)
+
+        # Penalize bufferbloat (latency variance)
+        avg = rtt_ms.get('avg', 0)
+        if avg > 0:
+            max_rtt = rtt_ms.get('max', 0)
+            bloat_factor = max_rtt / avg
+            if bloat_factor > 1.5:
+                score -= min(20, (bloat_factor - 1.5) * 10)
+
+        rating = "Elite"
+        if score < 30:
+            rating = "Critical"
+        elif score < 50:
+            rating = "Degraded"
+        elif score < 75:
+            rating = "Nominal"
+        elif score < 90:
+            rating = "High-Quality"
+
+        return {
+            'quality_score': round(max(0, score), 1),
+            'rating': rating,
+            'packet_loss_pct': loss
+        }
 
     def _extract_all_rtts(self, output: str) -> List[float]:
         """Extract individual RTT values for statistical analysis."""
@@ -496,27 +638,33 @@ class LatencyTracer:
         return any(re.search(p, host, re.IGNORECASE) for p in cdn)
 
     def _parse_ping_output(self, output: str) -> Dict[str, float]:
-        stats = {}
+        stats = {'loss_pct': 100.0}
+        
+        # Extract packet loss
+        loss_match = re.search(r"(\d+)% packet loss", output)
+        if loss_match:
+            stats['loss_pct'] = float(loss_match.group(1))
+
         if self.system == "windows":
             p = r"Minimum = (\d+)ms, Maximum = (\d+)ms, Average = (\d+)ms"
             match = re.search(p, output)
             if match:
-                stats = {
+                stats.update({
                     'min': float(match.group(1)),
                     'max': float(match.group(2)),
                     'avg': float(match.group(3)),
                     'mdev': 0.0
-                }
+                })
         else:
             p = r"(\d+\.\d+)/(\d+\.\d+)/(\d+\.\d+)/(\d+\.\d+) ms"
             match = re.search(p, output)
             if match:
-                stats = {
+                stats.update({
                     'min': float(match.group(1)),
                     'avg': float(match.group(2)),
                     'max': float(match.group(3)),
                     'mdev': float(match.group(4))
-                }
+                })
         return stats
 
     def estimate_distance(self,
@@ -532,23 +680,60 @@ class LatencyTracer:
 
     async def traceroute(self, host: str,
                          max_hops: int = 20) -> Dict[str, Any]:
+        """
+        Refined traceroute with ASN path analysis and IXP detection.
+        """
         if self.system == "windows":
             cmd = ["tracert", "-d", "-h", str(max_hops), host]
         else:
             cmd = ["traceroute", "-n", "-m", str(max_hops), host]
+
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd, stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=45)
             output = stdout.decode().strip()
-            hops = re.findall(r"(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})", output)
+
+            # Extract unique IPs from the output
+            hop_ips = re.findall(r"(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})", output)
+            
+            # Parallel ASN resolution for each unique hop
+            unique_ips = list(dict.fromkeys(hop_ips))
+            asn_tasks = [self.get_asn_info(ip) for ip in unique_ips]
+            asn_results = await asyncio.gather(*asn_tasks)
+            asn_map = dict(zip(unique_ips, asn_results))
+
+            refined_hops = []
+            for ip in hop_ips:
+                intel = asn_map.get(ip, {})
+                refined_hops.append({
+                    'ip': ip,
+                    'asn': intel.get('asn'),
+                    'owner': intel.get('owner'),
+                    'country': intel.get('country')
+                })
+
             ixps = [ix for ix in self.IXP_PATTERNS
                     if re.search(ix, output, re.IGNORECASE)]
+            
+            # AS Path deduction
+            as_path = [h['asn'] for h in refined_hops if h['asn']]
+            # Remove consecutive duplicates in AS path
+            dedup_as_path = [as_path[i] for i in range(len(as_path)) 
+                            if i == 0 or as_path[i] != as_path[i-1]]
+
             return {
-                'host': host, 'hop_count': len(hops), 'hops': hops,
-                'ixps': list(set(ixps))
+                'host': host,
+                'hop_count': len(refined_hops),
+                'hops': refined_hops,
+                'ixps': list(set(ixps)),
+                'as_path': dedup_as_path,
+                'path_intel': {
+                    'countries': list(set(h['country'] for h in refined_hops if h['country'])),
+                    'unique_asns': len(set(dedup_as_path))
+                }
             }
         except Exception as e:
             return {'host': host, 'error': str(e)}
@@ -615,6 +800,9 @@ class LatencyTracer:
                 final[vp_info['id']] = res
 
         final['clock_skew_hz'] = await self.measure_clock_skew(target_ip)
+        if final['clock_skew_hz'] is None:
+            final['clock_skew_hz'] = await self.measure_icmp_clock_skew(target_ip)
+
         final['path_analysis'] = await self.traceroute(target_ip)
 
         if len(tri_data) >= 2:
