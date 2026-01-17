@@ -5,7 +5,9 @@ import re
 import ipaddress
 import time
 import statistics
+import aiodns
 from typing import List, Dict, Any, Tuple, Optional
+from scapy.all import IP, TCP, sr1, conf
 
 
 logger = logging.getLogger(__name__)
@@ -39,6 +41,43 @@ class LatencyTracer:
     def __init__(self):
         self.system = platform.system().lower()
         self._cache = {}
+        self.resolver = aiodns.DNSResolver()
+
+    async def get_asn_info(self, ip: str) -> Dict[str, Any]:
+        """Query Team Cymru ASN DNS API for network intelligence."""
+        try:
+            if self._is_ipv6(ip):
+                return {'error': 'IPv6 ASN lookup not implemented'}
+
+            # Reverse IP for Cymru DNS query
+            rev_ip = ".".join(reversed(ip.split(".")))
+            query = f"{rev_ip}.origin.asn.cymru.com"
+            response = await self.resolver.query(query, 'TXT')
+
+            if response:
+                # Format: "ASN | IP Prefix | Country | Registry | Date"
+                parts = response[0].text.decode().split("|")
+                asn = parts[0].strip()
+
+                # Second query for ASN description
+                desc_query = f"AS{asn}.asn.cymru.com"
+                desc_res = await self.resolver.query(desc_query, 'TXT')
+                if desc_res:
+                    owner = desc_res[0].text.decode().split("|")[-1].strip()
+                else:
+                    owner = "Unknown"
+
+                return {
+                    'asn': asn,
+                    'prefix': parts[1].strip(),
+                    'country': parts[2].strip(),
+                    'owner': owner,
+                    'is_known_vpn': any(x in owner.lower()
+                                        for x in ['vpn', 'proxy', 'tor', 'hosting'])
+                }
+        except Exception:
+            pass
+        return {}
 
     def _get_from_cache(self, host: str) -> Optional[Dict[str, Any]]:
         """Retrieve data from cache if not expired."""
@@ -54,29 +93,94 @@ class LatencyTracer:
 
     async def tcp_ping(self, host: str, port: int = 443,
                        timeout: int = 2) -> Dict[str, Any]:
-        """Enhanced TCP handshake for latency and header heuristics."""
+        """Deep Packet Inspection TCP handshake via Scapy."""
+        try:
+            conf.verb = 0
+            syn_packet = IP(dst=host) / TCP(dport=port, flags="S")
+            start = time.perf_counter()
+
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                None, lambda: sr1(syn_packet, timeout=timeout, verbose=0)
+            )
+            latency = (time.perf_counter() - start) * 1000
+
+            if response and response.haslayer(TCP):
+                opts = response.getlayer(TCP).options
+                intel = self._analyze_tcp_options(opts)
+                return {
+                    'latency': round(latency, 3),
+                    'win_size': response.getlayer(TCP).window,
+                    'tcp_options': intel,
+                    'status': 'success'
+                }
+
+            return await self._tcp_ping_fallback(host, port, timeout)
+        except Exception:
+            return await self._tcp_ping_fallback(host, port, timeout)
+
+    async def _tcp_ping_fallback(self, host: str, port: int, timeout: int):
+        """Standard TCP connect fallback."""
         try:
             start = time.perf_counter()
-            # In a real SIGINT scenario, we'd use raw sockets (scapy)
-            # to capture Window Size and Timestamps.
             _, writer = await asyncio.wait_for(
                 asyncio.open_connection(host, port), timeout=timeout
             )
             latency = (time.perf_counter() - start) * 1000
-
-            # Simulated header extraction (TCP Window/Options)
-            # In production, this would come from a packet capture layer
-            win_size = 65535  # Common for modern mobile/desktop
-
             writer.close()
             await writer.wait_closed()
             return {
                 'latency': round(latency, 3),
-                'win_size': win_size,
-                'status': 'success'
+                'status': 'success',
+                'method': 'Standard_Connect'
             }
         except Exception:
             return {'status': 'failed'}
+
+    async def measure_clock_skew(self, host: str, port: int = 443) -> Optional[float]:
+        """Estimate target clock skew (Hz) via TCP Timestamps."""
+        try:
+            s1 = await self.tcp_ping(host, port)
+            t1_local = time.perf_counter()
+            t1_remote = s1.get('tcp_options', {}).get('ts_val')
+
+            if t1_remote is None:
+                return None
+
+            await asyncio.sleep(1.0)  # 1 second interval
+
+            s2 = await self.tcp_ping(host, port)
+            t2_local = time.perf_counter()
+            t2_remote = s2.get('tcp_options', {}).get('ts_val')
+
+            if t2_remote is None:
+                return None
+
+            remote_delta = t2_remote - t1_remote
+            local_delta = t2_local - t1_local
+            return round(remote_delta / local_delta, 2)
+        except Exception:
+            return None
+
+    def _analyze_tcp_options(self, options: List[Tuple[str, Any]]) -> Dict[str, Any]:
+        """Analyze TCP Options for expert-level OS fingerprinting."""
+        opt_names = [opt[0] for opt in options]
+
+        fp = "Unknown"
+        if "Timestamp" in opt_names and "WScale" in opt_names:
+            if opt_names[1] == "SACK":
+                fp = "Linux Kernel 3.x+"
+            else:
+                fp = "iOS/macOS"
+        elif "WScale" in opt_names and "NOP" in opt_names:
+            fp = "Windows"
+
+        return {
+            'fingerprint': fp,
+            'options': opt_names,
+            'ts_val': next((opt[1] for opt in options
+                            if opt[0] == "Timestamp"), None)
+        }
 
     async def ping(self, host: str, count: int = 10,
                    timeout: int = 5, use_cache: bool = True) -> Dict[str, Any]:
@@ -107,18 +211,28 @@ class LatencyTracer:
                 raw_rtts = self._extract_all_rtts(output)
                 ttl = self._extract_ttl(output)
 
-                # SIGINT Intelligence Layer
                 jitter_profile = self._analyze_jitter_profile(raw_rtts)
                 bufferbloat = self._detect_bufferbloat(raw_rtts)
-                os_fp = self._fingerprint_os(ttl, jitter_profile)
                 anycast = self._detect_anycast(host, stats.get('avg', 0))
                 proxy_anomaly = self._detect_proxy_vpn_anomaly(
                     stats.get('avg', 0), ttl, jitter_profile['jitter']
                 )
 
+                tcp_task = asyncio.create_task(self.tcp_ping(host))
+                asn_task = asyncio.create_task(self.get_asn_info(host))
+                tcp_intel, asn_intel = await asyncio.gather(tcp_task, asn_task)
+
+                os_fp = self._fingerprint_os(
+                    ttl, jitter_profile,
+                    tcp_intel.get('win_size'),
+                    tcp_intel.get('tcp_options')
+                )
+
                 dist, margin = self.estimate_distance(
                     stats.get('avg', 0), stats.get('mdev', 0)
                 )
+
+                is_vpn = proxy_anomaly or asn_intel.get('is_known_vpn', False)
 
                 result = {
                     'host': host,
@@ -128,10 +242,12 @@ class LatencyTracer:
                         'os': os_fp,
                         'network_type': jitter_profile['type'],
                         'is_anycast': anycast,
-                        'proxy_vpn_detected': proxy_anomaly,
+                        'proxy_vpn_detected': is_vpn,
                         'bufferbloat_detected': bufferbloat,
                         'ttl': ttl,
-                        'jitter_ms': jitter_profile['jitter']
+                        'jitter_ms': jitter_profile['jitter'],
+                        'tcp_fingerprint': tcp_intel.get('tcp_options'),
+                        'asn_data': asn_intel
                     },
                     'distance_estimate': {'km': dist, 'margin_km': margin},
                     'method': 'ICMP_Advanced'
@@ -139,7 +255,6 @@ class LatencyTracer:
                 self._save_to_cache(host, result)
                 return result
 
-            # TCP Fallback
             tcp_res = await self.tcp_ping(host)
             if tcp_res['status'] == 'success':
                 dist, margin = self.estimate_distance(tcp_res['latency'], 0)
@@ -164,7 +279,6 @@ class LatencyTracer:
             return {'type': 'Unknown', 'jitter': 0.0}
 
         jitter = statistics.stdev(rtts) if len(rtts) > 1 else 0.0
-        # Mobile networks (4G/5G) have high jitter due to radio scheduling
         net_type = "Fixed/Fiber"
         if jitter > self.MOBILE_JITTER_THRESHOLD:
             net_type = "Mobile/Radio (Potential Android/iOS)"
@@ -175,28 +289,18 @@ class LatencyTracer:
         """Detect domestic router congestion (Bufferbloat)."""
         if not rtts:
             return False
-        # If max RTT is significantly higher than min RTT, buffers are filling
         return (max(rtts) - min(rtts)) > self.BUFFERBLOAT_THRESHOLD
 
     def _detect_proxy_vpn_anomaly(self, avg_rtt: float,
                                   ttl: Optional[int],
                                   jitter: float) -> bool:
-        """
-        Identify Proxy/VPN tunnels via latency/TTL anomalies.
-        - High jitter on low-latency links.
-        - Non-standard TTL values.
-        - Latency inconsistent with fiber physical limits.
-        """
+        """Identify Proxy/VPN tunnels via latency/TTL anomalies."""
         if not ttl or avg_rtt == 0:
             return False
 
-        # VPNs often add 10-20ms overhead and high jitter
         if avg_rtt < 30.0 and jitter > 10.0:
             return True
 
-        # Non-standard TTL after few hops (VPNs often use 64 or 128)
-        # If TTL is e.g. 59, it means ~5 hops. If latency is 200ms,
-        # but only 5 hops, it's likely a tunneled connection (Proxy).
         hops = 0
         if ttl <= 64:
             hops = 64 - ttl
@@ -205,7 +309,6 @@ class LatencyTracer:
         elif ttl <= 255:
             hops = 255 - ttl
 
-        # Heuristic: suspicious if RTT/hops > 50ms per hop for fixed lines
         if hops > 0 and (avg_rtt / hops) > 50.0:
             return True
 
@@ -213,8 +316,12 @@ class LatencyTracer:
 
     def _fingerprint_os(self, ttl: Optional[int],
                         jitter_data: Dict[str, Any],
-                        win_size: Optional[int] = None) -> str:
-        """Advanced OS detection: TTL + Network Profile + TCP Window."""
+                        win_size: Optional[int] = None,
+                        tcp_options: Optional[Dict[str, Any]] = None) -> str:
+        """Advanced OS detection: TTL + Network Profile + TCP Options."""
+        if tcp_options and tcp_options.get('fingerprint') != "Unknown":
+            return tcp_options['fingerprint']
+
         if not ttl:
             if win_size:
                 if win_size == 64240:
@@ -223,9 +330,7 @@ class LatencyTracer:
                     return "FreeBSD/macOS (TCP-based)"
             return "Unknown"
 
-        # Base TTL logic
         if ttl <= 64:
-            # Android, Linux, and macOS all use TTL 64
             if jitter_data.get('type', '').startswith("Mobile/Radio"):
                 return "Android/Mobile Device"
             if win_size == 65535:
@@ -313,6 +418,16 @@ class LatencyTracer:
         except Exception as e:
             return {'host': host, 'error': str(e)}
 
+    def validate_physical_constraints(self, dist_km: float, rtt_ms: float) -> bool:
+        """
+        Verify if the distance/latency pair respects physical laws.
+        Fiber Speed of Light is ~200,000 km/s (200 km/ms).
+        """
+        if rtt_ms <= 0:
+            return False
+        min_rtt = (dist_km * 2.0) / self.FIBER_SPEED_KM_MS
+        return rtt_ms >= min_rtt
+
     def triangulate(self,
                     vantage_points: List[Dict[str, Any]]) \
             -> Tuple[float, float, float]:
@@ -325,16 +440,19 @@ class LatencyTracer:
         avg_mdev = total_mdev / len(vantage_points)
 
         for vp in vantage_points:
-            # Weight is inversely proportional to distance and jitter
+            is_possible = self.validate_physical_constraints(
+                vp['dist_km'], vp.get('avg_rtt', 0)
+            )
+            phys_w = 1.0 if is_possible else 0.1
+
             dist_w = 1.0 / max(0.1, vp['dist_km'])
             jitter_w = 1.0 / max(0.1, vp.get('mdev', 0))
-            w = dist_w * jitter_w
+            w = dist_w * jitter_w * phys_w
 
             total_w += w
             w_lat += vp['lat'] * w
             w_lon += vp['lon'] * w
 
-        # Confidence based on number of VPs and overall jitter
         base_conf = min(0.9, len(vantage_points) / 5.0)
         jitter_penalty = min(0.4, avg_mdev / 100.0)
         confidence = round(base_conf - jitter_penalty, 2)
@@ -356,10 +474,14 @@ class LatencyTracer:
                 tri_data.append({
                     'lat': vp_info['lat'], 'lon': vp_info['lon'],
                     'dist_km': res['distance_estimate']['km'],
-                    'mdev': res['rtt_ms'].get('mdev', 0)
+                    'mdev': res['rtt_ms'].get('mdev', 0),
+                    'avg_rtt': res['rtt_ms'].get('avg', 0)
                 })
                 final[vp_info['id']] = res
+
+        final['clock_skew_hz'] = await self.measure_clock_skew(target_ip)
         final['path_analysis'] = await self.traceroute(target_ip)
+
         if len(tri_data) >= 2:
             lat, lon, score = self.triangulate(tri_data)
             final['location_estimate'] = {
