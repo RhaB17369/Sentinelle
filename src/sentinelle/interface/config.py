@@ -54,3 +54,18 @@ class UIConfig:
     
 
     REFRESH_RATE = 1.0  # seconds
+    
+
+class SecurityConfig:
+    # Tor Configuration
+    TOR_PROXY = "socks5://127.0.0.1:9050"
+    ENABLE_TOR = False
+    
+    # Proxy Rotation
+    PROXY_LIST = []  # Can be populated from .env or file
+    ROTATE_PROXIES = True
+    
+    # OPSEC settings
+    MAX_RETRIES = 3
+    REQUEST_TIMEOUT = 30
+    DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"

@@ -3,7 +3,6 @@ from termcolor import colored
 import httpx
 import trio
 
-from subprocess import Popen, PIPE
 import os
 from argparse import ArgumentParser
 import csv
@@ -91,34 +90,7 @@ def get_functions(modules, args=None):
 
     return websites
 
-def check_update():
-    """Check and update holehe if not the last version"""
-    check_version = httpx.get("https://pypi.org/pypi/holehe/json")
-    if check_version.json()["info"]["version"] != __version__:
-        if os.name != 'nt':
-            p = Popen(["pip3",
-                       "install",
-                       "--upgrade",
-                       "holehe"],
-                      stdout=PIPE,
-                      stderr=PIPE)
-        else:
-            p = Popen(["pip",
-                       "install",
-                       "--upgrade",
-                       "holehe"],
-                      stdout=PIPE,
-                      stderr=PIPE)
-        (output, err) = p.communicate()
-        p_status = p.wait()
-        print("Holehe has just been updated, you can restart it.")
-        exit()
 
-def credit():
-    """Print Credit"""
-    print('Twitter : @palenath')
-    print('Github : https://github.com/megadose/holehe')
-    print('For BTC Donations : 1FHDM49QfZX6pJmhjLE5tB2K6CaTLMZpXZ')
 
 def is_email(email: str) -> bool:
     """Check if the input is a valid email address
