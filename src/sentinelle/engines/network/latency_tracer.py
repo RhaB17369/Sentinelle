@@ -7,7 +7,7 @@ import time
 import statistics
 import aiodns
 from typing import List, Dict, Any, Tuple, Optional
-from scapy.all import IP, TCP, sr1, conf
+from scapy.all import IP, TCP, ICMP, sr1, conf, sr
 
 
 logger = logging.getLogger(__name__)
@@ -28,6 +28,10 @@ class LatencyTracer:
     MOBILE_JITTER_THRESHOLD = 15.0
     # Jitter variance threshold for Bufferbloat detection
     BUFFERBLOAT_THRESHOLD = 50.0
+    # Satellite/Starlink thresholds
+    SAT_RTT_THRESHOLD = 480.0
+    STARLINK_RTT_MAX = 100.0
+    STARLINK_JITTER_THRESHOLD = 20.0
 
     IXP_PATTERNS = [
         r"\.ix\.", r"\.exchange\.", r"decix", r"equinix", r"ams-ix",
@@ -43,23 +47,48 @@ class LatencyTracer:
         self._cache = {}
         self.resolver = aiodns.DNSResolver()
 
+    async def get_semantic_geo(self, ip: str) -> Dict[str, Any]:
+        """Extract geographic clues from Reverse DNS hostnames."""
+        try:
+            addr = ".".join(reversed(ip.split("."))) + ".in-addr.arpa"
+            response = await self.resolver.query(addr, 'PTR')
+            if not response:
+                return {}
+
+            hostname = response[0].value.decode().lower()
+
+            # IATA codes (LHR, CDG, FRA, JFK, etc.)
+            iata_patterns = r"\b(lhr|cdg|fra|jfk|lax|hkg|sin|ams|sfo|sea|dfw)\b"
+            iata_match = re.search(iata_patterns, hostname)
+
+            # City name snippets
+            city_patterns = r"(paris|london|berlin|new-york|tokyo|madrid|milan)"
+            city_match = re.search(city_patterns, hostname)
+
+            return {
+                'ptr': hostname,
+                'detected_city_code': (iata_match.group(0).upper()
+                                       if iata_match else None),
+                'detected_city_name': (city_match.group(0).capitalize()
+                                       if city_match else None)
+            }
+        except Exception:
+            return {}
+
     async def get_asn_info(self, ip: str) -> Dict[str, Any]:
         """Query Team Cymru ASN DNS API for network intelligence."""
         try:
             if self._is_ipv6(ip):
                 return {'error': 'IPv6 ASN lookup not implemented'}
 
-            # Reverse IP for Cymru DNS query
             rev_ip = ".".join(reversed(ip.split(".")))
             query = f"{rev_ip}.origin.asn.cymru.com"
             response = await self.resolver.query(query, 'TXT')
 
             if response:
-                # Format: "ASN | IP Prefix | Country | Registry | Date"
                 parts = response[0].text.decode().split("|")
                 asn = parts[0].strip()
 
-                # Second query for ASN description
                 desc_query = f"AS{asn}.asn.cymru.com"
                 desc_res = await self.resolver.query(desc_query, 'TXT')
                 if desc_res:
@@ -137,6 +166,82 @@ class LatencyTracer:
         except Exception:
             return {'status': 'failed'}
 
+    async def discover_path_mtu(self, host: str) -> Dict[str, Any]:
+        """
+        Binary search for Path MTU discovery via ICMP DF flag.
+        Reveals tunneling protocols (VPN/IPsec/Wireguard).
+        """
+        try:
+            if self._is_ipv6(host):
+                return {'mtu': 1280, 'type': 'IPv6 Default'}
+
+            mtu = 1500
+            loop = asyncio.get_event_loop()
+
+            for test_mtu in [1500, 1492, 1420, 1400, 1280]:
+                payload = "X" * (test_mtu - 28)
+                pkt = IP(dst=host, flags="DF")/ICMP()/payload
+                ans = await loop.run_in_executor(
+                    None, lambda p=pkt: sr1(p, timeout=1, verbose=0)
+                )
+                if ans:
+                    mtu = test_mtu
+                    break
+
+            return {
+                'mtu': mtu,
+                'intelligence': self._fingerprint_mtu(mtu)
+            }
+        except Exception:
+            return {'mtu': 1500, 'intelligence': 'Default/Unknown'}
+
+    def _fingerprint_mtu(self, mtu: int) -> str:
+        """Map MTU values to common network technologies."""
+        if mtu == 1500:
+            return "Standard Ethernet"
+        if mtu == 1492:
+            return "PPPoE (DSL)"
+        if mtu == 1420:
+            return "Wireguard VPN"
+        if mtu == 1400:
+            return "Generic Tunnel (IPsec/GRE)"
+        if mtu < 1400:
+            return "Encapsulated/VPN Tunnel"
+        return "Unknown"
+
+    async def _get_ip_id_intelligence(self, host: str, count: int = 5) -> Dict[str, Any]:
+        """Analyze IP ID sequence to detect NAT or OS behavior."""
+        try:
+            if self._is_ipv6(host):
+                return {'type': 'IPv6 (No ID)'}
+
+            packets = IP(dst=host)/ICMP()
+            loop = asyncio.get_event_loop()
+
+            ans, _ = await loop.run_in_executor(
+                None, lambda: sr(packets * count, timeout=2, verbose=0)
+            )
+
+            ids = [pkt[1].id for pkt in ans]
+            if len(ids) < 2:
+                return {'type': 'Insufficient Data'}
+
+            diffs = [ids[i+1] - ids[i] for i in range(len(ids)-1)]
+
+            if all(d == 0 for d in diffs):
+                return {'type': 'Constant (Likely Linux/Android)', 'values': ids}
+            elif all(1 <= d <= 2 for d in diffs):
+                return {'type': 'Incremental (Likely Windows/Network Device)',
+                        'values': ids}
+            elif any(d < 0 for d in diffs) or \
+                    statistics.stdev([float(d) for d in diffs]) > 1000:
+                return {'type': 'Random/High-Traffic (Potential NAT/Load Balancer)',
+                        'values': ids}
+
+            return {'type': 'Mixed', 'values': ids}
+        except Exception:
+            return {'type': 'Error during capture'}
+
     async def measure_clock_skew(self, host: str, port: int = 443) -> Optional[float]:
         """Estimate target clock skew (Hz) via TCP Timestamps."""
         try:
@@ -147,7 +252,7 @@ class LatencyTracer:
             if t1_remote is None:
                 return None
 
-            await asyncio.sleep(1.0)  # 1 second interval
+            await asyncio.sleep(1.0)
 
             s2 = await self.tcp_ping(host, port)
             t2_local = time.perf_counter()
@@ -218,9 +323,21 @@ class LatencyTracer:
                     stats.get('avg', 0), ttl, jitter_profile['jitter']
                 )
 
+                # Parallel Intelligence Gathering (Deep SIGINT)
                 tcp_task = asyncio.create_task(self.tcp_ping(host))
                 asn_task = asyncio.create_task(self.get_asn_info(host))
-                tcp_intel, asn_intel = await asyncio.gather(tcp_task, asn_task)
+                ipid_task = asyncio.create_task(self._get_ip_id_intelligence(host))
+                mtu_task = asyncio.create_task(self.discover_path_mtu(host))
+                geo_task = asyncio.create_task(self.get_semantic_geo(host))
+
+                res_gather = await asyncio.gather(
+                    tcp_task, asn_task, ipid_task, mtu_task, geo_task
+                )
+                tcp_intel, asn_intel, ipid_intel, mtu_intel, geo_intel = res_gather
+
+                link_type = self._classify_link_type(
+                    stats.get('avg', 0), jitter_profile['jitter']
+                )
 
                 os_fp = self._fingerprint_os(
                     ttl, jitter_profile,
@@ -240,17 +357,20 @@ class LatencyTracer:
                     'rtt_ms': stats,
                     'intelligence': {
                         'os': os_fp,
-                        'network_type': jitter_profile['type'],
+                        'link_medium': link_type,
                         'is_anycast': anycast,
                         'proxy_vpn_detected': is_vpn,
                         'bufferbloat_detected': bufferbloat,
                         'ttl': ttl,
                         'jitter_ms': jitter_profile['jitter'],
                         'tcp_fingerprint': tcp_intel.get('tcp_options'),
-                        'asn_data': asn_intel
+                        'asn_data': asn_intel,
+                        'ip_id_analysis': ipid_intel,
+                        'path_mtu': mtu_intel,
+                        'semantic_location': geo_intel
                     },
                     'distance_estimate': {'km': dist, 'margin_km': margin},
-                    'method': 'ICMP_Advanced'
+                    'method': 'ICMP_Advanced_SIGINT'
                 }
                 self._save_to_cache(host, result)
                 return result
@@ -272,6 +392,21 @@ class LatencyTracer:
             return {'host': host, 'status': 'unreachable'}
         except Exception as e:
             return {'host': host, 'status': 'error', 'message': str(e)}
+
+    def _classify_link_type(self, avg_rtt: float, jitter: float) -> str:
+        """Categorize physical medium based on statistical signatures."""
+        if avg_rtt > self.SAT_RTT_THRESHOLD:
+            return "Geostationary Satellite (High Latency)"
+
+        # Starlink has unique signatures: ~30-80ms RTT with higher jitter
+        if 25.0 < avg_rtt < self.STARLINK_RTT_MAX and \
+           jitter > self.STARLINK_JITTER_THRESHOLD:
+            return "LEO Satellite (Likely Starlink)"
+
+        if jitter > self.MOBILE_JITTER_THRESHOLD:
+            return "Mobile/Radio (4G/5G/LTE)"
+
+        return "Terrestrial (Fiber/Copper)"
 
     def _analyze_jitter_profile(self, rtts: List[float]) -> Dict[str, Any]:
         """Distinguish Fixed vs Mobile (Android/iOS) via RTT variance."""
