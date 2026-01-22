@@ -17,13 +17,19 @@ from .modules.export.json import saveToJson
 from .modules.core.username import checkSite as bb_check_site_u
 from .modules.core.email import checkSite as bb_check_site_e
 
-class SocialEngine:
-    def __init__(self, console):
+from ...core.engine import BaseEngine, EventType
+
+__version__ = "2.0.0"
+
+class SocialEngine(BaseEngine):
+    def __init__(self, console=None):
+        super().__init__()
         self.console = console
         self.config = bb_config
-        self.config.console = console
+        if console:
+            self.config.console = console
 
-    async def run_search(self, targets, search_type, settings):
+    async def run(self, target: str, search_type: str = "username", **settings) -> Any:
         # Initialize config with settings
         self.config.dateRaw = datetime.now().strftime("%m_%d_%Y")
         self.config.datePretty = datetime.now().strftime("%B %d, %Y")
@@ -50,158 +56,111 @@ class SocialEngine:
             try:
                 checkUpdates(self.config)
             except Exception as e:
-                self.console.print(f"[yellow]⚠️ Failed to check for updates: {e}[/]")
+                self.log(f"[yellow]⚠️ Failed to check for updates: {e}[/]")
 
-        results_summary = []
+        if search_type == "username":
+            self.config.username = [target]
+            self.config.currentUser = target
+            self.config.currentEmail = None
+            try:
+                data_list = readList("username", self.config)
+                self.config.metadata_params = readList("metadata", self.config)
+            except Exception as e:
+                self.error(f"Could not load site lists: {e}")
+                return None
+        else:
+            self.config.email = [target]
+            self.config.currentEmail = target
+            self.config.currentUser = None
+            try:
+                data_list = readList("email", self.config)
+            except Exception as e:
+                self.error(f"Could not load site lists: {e}")
+                return None
 
-        for target_val in targets:
-            if search_type == "username":
-                self.config.username = [target_val]
-                self.config.currentUser = target_val
-                self.config.currentEmail = None
-                try:
-                    data_list = readList("username", self.config)
-                    self.config.metadata_params = readList("metadata", self.config)
-                except Exception as e:
-                    self.console.print(f"[red]❌ Could not load site lists: {e}[/]")
-                    # Skip this target and continue with others
-                    results_summary.append({
-                        "target": target_val,
-                        "found": 0,
-                        "accounts": [],
-                        "ai_analysis": None,
-                        "error": str(e),
-                    })
-                    continue
-            else:
-                self.config.email = [target_val]
-                self.config.currentEmail = target_val
-                self.config.currentUser = None
-                try:
-                    data_list = readList("email", self.config)
-                except Exception as e:
-                    self.console.print(f"[red]❌ Could not load site lists: {e}[/]")
-                    results_summary.append({
-                        "target": target_val,
-                        "found": 0,
-                        "accounts": [],
-                        "ai_analysis": None,
-                        "error": str(e),
-                    })
-                    continue
-
-            sites = applyFilters(data_list["sites"], self.config)
-            self.config.userAgent = getRandomUserAgent(self.config)
+        sites = applyFilters(data_list["sites"], self.config)
+        self.config.userAgent = getRandomUserAgent(self.config)
+        
+        found_accounts = []
+        
+        async with aiohttp.ClientSession() as session:
+            semaphore = asyncio.Semaphore(self.config.max_concurrent_requests)
             
-            found_accounts = []
+            tasks = []
+            for site in sites:
+                if search_type == "username":
+                    url = site["uri_check"].replace("{account}", target)
+                    tasks.append(bb_check_site_u(site, "GET", url, session, semaphore, self.config))
+                else:
+                    email_processed = processInput(target, site["input_operation"], self.config) if site.get("input_operation") else target
+                    url = site["uri_check"].replace("{account}", email_processed)
+                    data_post = site["data"].replace("{account}", email_processed) if site.get("data") else None
+                    headers = site.get("headers")
+                    tasks.append(bb_check_site_e(site, site["method"], url, session, semaphore, self.config, data_post, headers))
             
-            # Use a callback for UI updates if provided, or handle it here
-            # For now, we'll keep the UI logic in the runner or pass a progress object
-            # To keep it decoupled, let's just return the results and let the caller handle UI
-            # OR we can pass a progress callback.
+            # We use a set of tasks and wait for them to complete properly
+            pending = {asyncio.create_task(coro) for coro in tasks}
             
-            async with aiohttp.ClientSession() as session:
-                semaphore = asyncio.Semaphore(self.config.max_concurrent_requests)
-                
-                tasks = []
-                for site in sites:
-                    if search_type == "username":
-                        url = site["uri_check"].replace("{account}", target_val)
-                        tasks.append(bb_check_site_u(site, "GET", url, session, semaphore, self.config))
-                    else:
-                        email_processed = processInput(target_val, site["input_operation"], self.config) if site.get("input_operation") else target_val
-                        url = site["uri_check"].replace("{account}", email_processed)
-                        data_post = site["data"].replace("{account}", email_processed) if site.get("data") else None
-                        headers = site.get("headers")
-                        tasks.append(bb_check_site_e(site, site["method"], url, session, semaphore, self.config, data_post, headers))
-                
-                # Progress and table tracking
-                progress = settings.get("progress")
-                task_id = settings.get("task_id")
-                table = settings.get("table")
-                log_callback = settings.get("log_callback")
+            self.log(f"🚀 Dispatched {len(tasks)} search requests for {target}")
 
-                # We use a set of tasks and wait for them to complete properly
-                # This is more robust than as_completed in some edge cases
-                pending = {asyncio.create_task(coro) for coro in tasks}
-                
-                if log_callback:
-                    log_callback(f"🚀 Dispatched {len(tasks)} search requests for {target_val}")
+            try:
+                while pending:
+                    done, pending = await asyncio.wait(
+                        pending, 
+                        return_when=asyncio.FIRST_COMPLETED
+                    )
+                    
+                    for task in done:
+                        try:
+                            res = await task
+                            self.progress(advance=1)
+                            
+                            if res and res.get("status") == "FOUND":
+                                found_accounts.append(res)
+                                self.log(f"✅ Found: {res['name']}")
+                                self.emit(EventType.DATA, data=res)
+                            elif res and res.get("status") == "ERROR":
+                                self.log(f"❌ Error on: {res['name']}")
+                        except Exception as e:
+                            self.log(f"⚠️ Task error: {str(e)}")
+            finally:
+                if pending:
+                    for task in pending:
+                        task.cancel()
+                    await asyncio.gather(*pending, return_exceptions=True)
 
-                try:
-                    while pending:
-                        done, pending = await asyncio.wait(
-                            pending, 
-                            return_when=asyncio.FIRST_COMPLETED
-                        )
-                        
-                        for task in done:
-                            try:
-                                res = await task
-                                if progress and task_id:
-                                    progress.advance(task_id)
-                                
-                                if res and res.get("status") == "FOUND":
-                                    found_accounts.append(res)
-                                    if log_callback:
-                                        log_callback(f"✅ Found: {res['name']}")
-                                    if table:
-                                        info = ""
-                                        if res.get("metadata"):
-                                            info = " | ".join([f"{m['name']}: {m['value']}" for m in res["metadata"]])
-                                        table.add_row(res["name"], "[bold green][+][/]", res["url"], info)
-                                elif res and res.get("status") == "ERROR":
-                                    if log_callback:
-                                        log_callback(f"❌ Error on: {res['name']}")
-                                elif log_callback:
-                                    # Still call log_callback (even if empty) to trigger UI refresh if it's tied to it
-                                    # Or just call it with a dummy value that doesn't add to log but triggers update
-                                    # Actually, let's just trigger the update if log_callback exists
-                                    log_callback(None) 
-                            except Exception as e:
-                                if log_callback:
-                                    log_callback(f"⚠️ Task error: {str(e)}")
-                finally:
-                    # Ensure all pending tasks are cancelled if we exit early
-                    if pending:
-                        for task in pending:
-                            task.cancel()
-                        await asyncio.gather(*pending, return_exceptions=True)
+        # AI Analysis
+        if self.config.ai and len(found_accounts) > 2:
+            try:
+                from .modules.ai.client import send_prompt
+                from .modules.ai.key_manager import load_api_key_from_file
+                apikey = load_api_key_from_file(self.config)
+                if apikey:
+                    site_names = [account.get("name", "") for account in found_accounts]
+                    prompt = ", ".join(site_names)
+                    analysis_data = send_prompt(prompt, self.config)
+                    if analysis_data:
+                        self.config.ai_analysis = analysis_data
+            except Exception as e:
+                self.log(f"[red]❌ AI Analysis error: {e}[/]")
 
-            # AI Analysis
-            if self.config.ai and len(found_accounts) > 2:
-                try:
-                    from .modules.ai.client import send_prompt
-                    from .modules.ai.key_manager import load_api_key_from_file
-                    apikey = load_api_key_from_file(self.config)
-                    if apikey:
-                        site_names = [account.get("name", "") for account in found_accounts]
-                        prompt = ", ".join(site_names)
-                        analysis_data = send_prompt(prompt, self.config)
-                        if analysis_data:
-                            self.config.ai_analysis = analysis_data
-                except Exception as e:
-                    self.console.print(f"[red]❌ AI Analysis error: {e}[/]")
+        # Handle Exports
+        if len(found_accounts) > 0:
+            if self.config.csv or self.config.pdf or self.config.json or self.config.dump:
+                createSaveDirectory(self.config)
+                if self.config.csv: saveToCsv(found_accounts, self.config)
+                if self.config.pdf: saveToPdf(found_accounts, search_type, self.config)
+                if self.config.json: saveToJson(found_accounts, self.config)
+        
+        result = {
+            "target": target,
+            "found": len(found_accounts),
+            "accounts": found_accounts,
+            "ai_analysis": self.config.ai_analysis
+        }
+        self.emit(EventType.COMPLETE, data=result)
+        return result
 
-            # Handle Exports
-            if len(found_accounts) > 0:
-                if self.config.csv or self.config.pdf or self.config.json or self.config.dump:
-                    createSaveDirectory(self.config)
-                    if self.config.csv: saveToCsv(found_accounts, self.config)
-                    if self.config.pdf: saveToPdf(found_accounts, search_type, self.config)
-                    if self.config.json: saveToJson(found_accounts, self.config)
-            
-            results_summary.append({
-                "target": target_val,
-                "found": len(found_accounts),
-                "accounts": found_accounts,
-                "ai_analysis": self.config.ai_analysis
-            })
-            
-            # Reset for next target
-            self.config.ai_analysis = None
-
-        return results_summary
 
     def setup_ai(self):
         """Configure SocialEngine AI API Key"""

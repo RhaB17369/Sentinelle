@@ -1,236 +1,148 @@
 """
-Domain/website OSINT collector.
+Domain/website OSINT engine.
 Gathers intelligence from WHOIS, DNS, SSL certificates, and HTTP headers.
 """
 
-import whois
-import dns.resolver
+import asyncio
 import ssl
 import socket
-import requests
+import logging
+import httpx
+import whois
+import dns.asyncresolver
 from typing import Dict, List, Optional, Any
 from datetime import datetime
-import logging
-from urllib.parse import urlparse
 
+from ...core.engine import BaseEngine, EventType
 
-class DomainCollector:
-    """Collect OSINT intelligence on domains and websites"""
+__version__ = "1.0.0"
+
+class DomainEngine(BaseEngine):
+    """Refactored Domain Intelligence Engine."""
     
-    def __init__(self):
-        self.logger = logging.getLogger(__name__)
-        self.dns_resolver = dns.resolver.Resolver()
-        self.dns_resolver.timeout = 5
-        self.dns_resolver.lifetime = 5
-    
-    def collect(self, domain: str) -> Dict[str, Any]:
-        """
-        Collect all available intelligence on a domain.
-        
-        Args:
-            domain: Domain name to investigate
-            
-        Returns:
-            Dictionary containing all collected intelligence
-        """
-        intelligence = {
-            'domain': domain,
-            'timestamp': datetime.now().isoformat(),
-            'whois': self._collect_whois(domain),
-            'dns': self._collect_dns(domain),
-            'ssl_certificate': self._collect_ssl_cert(domain),
-            'http_headers': self._collect_http_headers(domain),
-            'technologies': self._detect_technologies(domain),
+    def __init__(self, timeout: int = 10):
+        super().__init__()
+        self.timeout = timeout
+        self.resolver = dns.asyncresolver.Resolver()
+        self.resolver.timeout = timeout
+        self.resolver.lifetime = timeout
+
+    async def run(self, domain: str, **kwargs) -> Dict[str, Any]:
+        self.log(f"🔍 Starting deep analysis for domain: {domain}")
+        self.progress(advance=0, total=5, description="Initializing")
+
+        results = {
+            "domain": domain,
+            "timestamp": datetime.now().isoformat()
         }
-        
-        return intelligence
-    
-    def _collect_whois(self, domain: str) -> Optional[Dict[str, Any]]:
-        """Collect WHOIS data"""
+
+        # 1. WHOIS (Sync, but wrapped in thread)
         try:
-            w = whois.whois(domain)
+            self.progress(advance=1, description="Querying WHOIS")
+            results["whois"] = await self._run_whois(domain)
+            if results["whois"]:
+                self.emit(EventType.DATA, data={"Category": "WHOIS", "Property": "Registrar", "Value": results["whois"].get("registrar")})
+                self.emit(EventType.DATA, data={"Category": "WHOIS", "Property": "Organization", "Value": results["whois"].get("org")})
+        except Exception as e:
+            self.error(f"WHOIS block failed: {str(e)}")
+
+        # 2. DNS
+        try:
+            self.progress(advance=1, description="Resolving DNS records")
+            results["dns"] = await self._run_dns(domain)
+            for record_type, values in results["dns"].items():
+                if values:
+                    self.emit(EventType.DATA, data={"Category": "DNS", "Property": record_type, "Value": ", ".join(values[:3]) + ("..." if len(values) > 3 else "")})
+        except Exception as e:
+            self.error(f"DNS block failed: {str(e)}")
+
+        # 3. SSL
+        try:
+            self.progress(advance=1, description="Checking SSL/TLS")
+            results["ssl"] = await self._run_ssl(domain)
+            if results["ssl"]:
+                self.emit(EventType.DATA, data={"Category": "Security", "Property": "Issuer", "Value": results["ssl"].get("issuer", {}).get("commonName")})
+                self.emit(EventType.DATA, data={"Category": "Security", "Property": "Expires", "Value": results["ssl"].get("not_after")})
+        except Exception as e:
+            self.error(f"SSL block failed: {str(e)}")
+
+        # 4. HTTP Headers & Tech
+        try:
+            self.progress(advance=1, description="Analyzing HTTP headers")
+            results["http"] = await self._run_http(domain)
+            if results["http"]:
+                self.emit(EventType.DATA, data={"Category": "Network", "Property": "Server", "Value": results["http"].get("server")})
+                self.emit(EventType.DATA, data={"Category": "Network", "Property": "Status", "Value": str(results["http"].get("status_code"))})
+        except Exception as e:
+            self.error(f"HTTP block failed: {str(e)}")
+
+        self.progress(advance=1, description="Analysis complete")
+        self.emit(EventType.COMPLETE, data=results)
+        return results
+
+    async def _run_whois(self, domain: str) -> Optional[Dict[str, Any]]:
+        try:
+            # whois.whois is blocking, run in executor
+            loop = asyncio.get_event_loop()
+            w = await loop.run_in_executor(None, whois.whois, domain)
             
-            # Extract relevant fields
-            whois_data = {
-                'registrar': w.registrar if hasattr(w, 'registrar') else None,
-                'creation_date': str(w.creation_date) if hasattr(w, 'creation_date') else None,
-                'expiration_date': str(w.expiration_date) if hasattr(w, 'expiration_date') else None,
-                'updated_date': str(w.updated_date) if hasattr(w, 'updated_date') else None,
+            return {
+                'registrar': getattr(w, 'registrar', None),
+                'creation_date': str(w.creation_date[0]) if isinstance(w.creation_date, list) else str(w.creation_date),
+                'expiration_date': str(w.expiration_date[0]) if isinstance(w.expiration_date, list) else str(w.expiration_date),
                 'name_servers': w.name_servers if hasattr(w, 'name_servers') else None,
-                'status': w.status if hasattr(w, 'status') else None,
-                'emails': w.emails if hasattr(w, 'emails') else None,
                 'org': w.org if hasattr(w, 'org') else None,
                 'country': w.country if hasattr(w, 'country') else None,
             }
-            
-            self.logger.info(f"WHOIS data collected for {domain}")
-            return whois_data
-            
         except Exception as e:
-            self.logger.warning(f"Failed to collect WHOIS for {domain}: {e}")
+            self.log(f"⚠️ WHOIS failed: {str(e)}")
             return None
-    
-    def _collect_dns(self, domain: str) -> Dict[str, List[str]]:
-        """Collect DNS records"""
+
+    async def _run_dns(self, domain: str) -> Dict[str, List[str]]:
         dns_data = {}
-        
-        # Record types to query
-        record_types = ['A', 'AAAA', 'MX', 'NS', 'TXT', 'CNAME', 'SOA']
+        record_types = ['A', 'MX', 'NS', 'TXT']
         
         for record_type in record_types:
             try:
-                answers = self.dns_resolver.resolve(domain, record_type)
+                answers = await self.resolver.resolve(domain, record_type)
                 dns_data[record_type] = [str(rdata) for rdata in answers]
-                self.logger.debug(f"DNS {record_type} records collected for {domain}")
-            except dns.resolver.NoAnswer:
-                dns_data[record_type] = []
-            except dns.resolver.NXDOMAIN:
-                self.logger.warning(f"Domain {domain} does not exist")
-                dns_data[record_type] = []
-            except Exception as e:
-                self.logger.warning(f"Failed to query {record_type} for {domain}: {e}")
+            except Exception:
                 dns_data[record_type] = []
         
         return dns_data
-    
-    def _collect_ssl_cert(self, domain: str) -> Optional[Dict[str, Any]]:
-        """Collect SSL/TLS certificate information"""
+
+    async def _run_ssl(self, domain: str) -> Optional[Dict[str, Any]]:
         try:
+            loop = asyncio.get_event_loop()
             context = ssl.create_default_context()
             
-            with socket.create_connection((domain, 443), timeout=5) as sock:
-                with context.wrap_socket(sock, server_hostname=domain) as ssock:
-                    cert = ssock.getpeercert()
-                    
-                    cert_data = {
-                        'subject': dict(x[0] for x in cert.get('subject', [])),
-                        'issuer': dict(x[0] for x in cert.get('issuer', [])),
-                        'version': cert.get('version'),
-                        'serial_number': cert.get('serialNumber'),
-                        'not_before': cert.get('notBefore'),
-                        'not_after': cert.get('notAfter'),
-                        'subject_alt_names': [x[1] for x in cert.get('subjectAltName', [])],
-                    }
-                    
-                    self.logger.info(f"SSL certificate collected for {domain}")
-                    return cert_data
-                    
-        except Exception as e:
-            self.logger.warning(f"Failed to collect SSL cert for {domain}: {e}")
-            return None
-    
-    def _collect_http_headers(self, domain: str) -> Optional[Dict[str, Any]]:
-        """Collect HTTP headers and response information"""
-        try:
-            # Try HTTPS first
-            for scheme in ['https', 'http']:
-                url = f"{scheme}://{domain}"
-                try:
-                    response = requests.get(
-                        url,
-                        timeout=10,
-                        allow_redirects=True,
-                        headers={'User-Agent': 'SENTINNELLE/1.0 (OSINT Intelligence Platform)'}
-                    )
-                    
-                    headers_data = {
-                        'status_code': response.status_code,
-                        'headers': dict(response.headers),
-                        'final_url': response.url,
-                        'redirect_chain': [r.url for r in response.history],
-                        'scheme': scheme,
-                    }
-                    
-                    self.logger.info(f"HTTP headers collected for {domain} via {scheme}")
-                    return headers_data
-                    
-                except requests.exceptions.RequestException:
-                    continue
-            
-            return None
-            
-        except Exception as e:
-            self.logger.warning(f"Failed to collect HTTP headers for {domain}: {e}")
-            return None
-    
-    def _detect_technologies(self, domain: str) -> List[str]:
-        """Detect technologies used by the website (simplified Wappalyzer-style)"""
-        technologies = []
-        
-        try:
-            url = f"https://{domain}"
-            response = requests.get(
-                url,
-                timeout=10,
-                headers={'User-Agent': 'SENTINNELLE/1.0 (OSINT Intelligence Platform)'}
+            # Use asyncio for connection to avoid blocking
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(domain, 443, ssl=context, server_hostname=domain),
+                timeout=self.timeout
             )
             
-            headers = response.headers
-            body = response.text.lower()
+            cert = writer.get_extra_info('peercert')
+            writer.close()
+            await writer.wait_closed()
             
-            # Server detection
-            if 'server' in headers:
-                server = headers['server']
-                technologies.append(f"Server: {server}")
-            
-            # Framework detection (simplified)
-            if 'x-powered-by' in headers:
-                technologies.append(f"Powered by: {headers['x-powered-by']}")
-            
-            # CMS detection (very basic)
-            cms_signatures = {
-                'wordpress': ['wp-content', 'wp-includes'],
-                'drupal': ['drupal.js', 'sites/default'],
-                'joomla': ['joomla', 'com_content'],
-                'django': ['csrfmiddlewaretoken'],
-                'flask': ['werkzeug'],
-            }
-            
-            for cms, signatures in cms_signatures.items():
-                if any(sig in body for sig in signatures):
-                    technologies.append(f"CMS: {cms}")
-            
-            # JavaScript libraries (basic detection)
-            js_libraries = {
-                'jquery': 'jquery',
-                'react': 'react',
-                'angular': 'angular',
-                'vue': 'vue.js',
-                'bootstrap': 'bootstrap',
-            }
-            
-            for lib, signature in js_libraries.items():
-                if signature in body:
-                    technologies.append(f"JS Library: {lib}")
-            
-            self.logger.info(f"Technologies detected for {domain}: {technologies}")
-            
-        except Exception as e:
-            self.logger.warning(f"Failed to detect technologies for {domain}: {e}")
-        
-        return technologies
-    
-    def get_domain_age(self, whois_data: Optional[Dict]) -> Optional[int]:
-        """Calculate domain age in days from WHOIS data"""
-        if not whois_data or not whois_data.get('creation_date'):
+            if cert:
+                return {
+                    'subject': dict(x[0] for x in cert.get('subject', [])),
+                    'issuer': dict(x[0] for x in cert.get('issuer', [])),
+                    'not_after': cert.get('notAfter'),
+                }
+        except Exception:
             return None
-        
+
+    async def _run_http(self, domain: str) -> Optional[Dict[str, Any]]:
         try:
-            creation_date_str = whois_data['creation_date']
-            # Handle list of dates (take first)
-            if isinstance(creation_date_str, list):
-                creation_date_str = creation_date_str[0]
-            
-            # Parse date string
-            if isinstance(creation_date_str, str):
-                # This is simplified - in production, handle various date formats
-                creation_date = datetime.fromisoformat(creation_date_str.replace(' ', 'T'))
-            else:
-                creation_date = creation_date_str
-            
-            age = (datetime.now() - creation_date).days
-            return age
-            
-        except Exception as e:
-            self.logger.warning(f"Failed to calculate domain age: {e}")
+            async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=True) as client:
+                response = await client.get(f"https://{domain}")
+                return {
+                    'status_code': response.status_code,
+                    'server': response.headers.get('server'),
+                    'powered_by': response.headers.get('x-powered-by'),
+                }
+        except Exception:
             return None

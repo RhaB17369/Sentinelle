@@ -165,12 +165,14 @@ def export_csv(data,args,email):
         exit("All results have been exported to "+name_file)
 
 async def launch_module(module,email, client, out):
-    data={'aboutme': 'about.me', 'adobe': 'adobe.com', 'amazon': 'amazon.com', 'anydo': 'any.do', 'archive': 'archive.org', 'armurerieauxerre': 'armurerie-auxerre.com', 'atlassian': 'atlassian.com', 'babeshows': 'babeshows.co.uk', 'badeggsonline': 'badeggsonline.com', 'biosmods': 'bios-mods.com', 'biotechnologyforums': 'biotechnologyforums.com', 'bitmoji': 'bitmoji.com', 'blablacar': 'blablacar.com', 'blackworldforum': 'blackworldforum.com', 'blip': 'blip.fm', 'blitzortung': 'forum.blitzortung.org', 'bluegrassrivals': 'bluegrassrivals.com', 'bodybuilding': 'bodybuilding.com', 'buymeacoffee': 'buymeacoffee.com', 'cambridgemt': 'discussion.cambridge-mt.com', 'caringbridge': 'caringbridge.org', 'chinaphonearena': 'chinaphonearena.com', 'clashfarmer': 'clashfarmer.com', 'codecademy': 'codecademy.com', 'codeigniter': 'forum.codeigniter.com', 'codepen': 'codepen.io', 'coroflot': 'coroflot.com', 'cpaelites': 'cpaelites.com', 'cpahero': 'cpahero.com', 'cracked_to': 'cracked.to', 'crevado': 'crevado.com', 'deliveroo': 'deliveroo.com', 'demonforums': 'demonforums.net', 'devrant': 'devrant.com', 'diigo': 'diigo.com', 'discord': 'discord.com', 'docker': 'docker.com', 'dominosfr': 'dominos.fr', 'ebay': 'ebay.com', 'ello': 'ello.co', 'envato': 'envato.com', 'eventbrite': 'eventbrite.com', 'evernote': 'evernote.com', 'fanpop': 'fanpop.com', 'firefox': 'firefox.com', 'flickr': 'flickr.com', 'freelancer': 'freelancer.com', 'freiberg': 'drachenhort.user.stunet.tu-freiberg.de', 'garmin': 'garmin.com', 'github': 'github.com', 'google': 'google.com', 'gravatar': 'gravatar.com', 'imgur': 'imgur.com', 'instagram': 'instagram.com', 'issuu': 'issuu.com', 'koditv': 'forum.kodi.tv', 'komoot': 'komoot.com', 'laposte': 'laposte.fr', 'lastfm': 'last.fm', 'lastpass': 'lastpass.com', 'mail_ru': 'mail.ru', 'mybb': 'community.mybb.com', 'myspace': 'myspace.com', 'nattyornot': 'nattyornotforum.nattyornot.com', 'naturabuy': 'naturabuy.fr', 'ndemiccreations': 'forum.ndemiccreations.com', 'nextpvr': 'forums.nextpvr.com', 'nike': 'nike.com', 'odnoklassniki': 'ok.ru', 'office365': 'office365.com', 'onlinesequencer': 'onlinesequencer.net', 'parler': 'parler.com', 'patreon': 'patreon.com', 'pinterest': 'pinterest.com', 'plurk': 'plurk.com', 'pornhub': 'pornhub.com', 'protonmail': 'protonmail.ch', 'quora': 'quora.com', 'rambler': 'rambler.ru', 'redtube': 'redtube.com', 'replit': 'replit.com', 'rocketreach': 'rocketreach.co', 'samsung': 'samsung.com', 'seoclerks': 'seoclerks.com', 'sevencups': '7cups.com', 'smule': 'smule.com', 'snapchat': 'snapchat.com', 'soundcloud': 'soundcloud.com', 'sporcle': 'sporcle.com', 'spotify': 'spotify.com', 'strava': 'strava.com', 'taringa': 'taringa.net', 'teamtreehouse': 'teamtreehouse.com', 'tellonym': 'tellonym.me', 'thecardboard': 'thecardboard.org', 'therianguide': 'forums.therian-guide.com', 'thevapingforum': 'thevapingforum.com', 'tumblr': 'tumblr.com', 'tunefind': 'tunefind.com', 'twitter': 'twitter.com', 'venmo': 'venmo.com', 'vivino': 'vivino.com', 'voxmedia': 'voxmedia.com', 'vrbo': 'vrbo.com', 'vsco': 'vsco.co', 'wattpad': 'wattpad.com', 'wordpress': 'wordpress.com', 'xing': 'xing.com', 'xnxx': 'xnxx.com', 'xvideos': 'xvideos.com', 'yahoo': 'yahoo.com','hubspot': 'hubspot.com', 'pipedrive': 'pipedrive.com', 'insightly': 'insightly.com', 'nutshell': 'nutshell.com', 'zoho': 'zoho.com', 'axonaut': 'axonaut.com', 'amocrm': 'amocrm.com', 'nimble': 'nimble.com', 'nocrm': 'nocrm.io', 'teamleader': 'teamleader.eu'}
     try:
         await module(email, client, out)
     except Exception:
-        name=str(module).split('<function ')[1].split(' ')[0]
-        out.append({"name": name,"domain":data[name],
+        try:
+            name = str(module).split('<function ')[1].split(' ')[0] if '<function ' in str(module) else str(module)
+        except Exception:
+            name = "unknown"
+        out.append({"name": name,"domain": name,
                     "rateLimit": False,
                     "error": True,
                     "exists": False,
@@ -232,43 +234,65 @@ async def maincore():
 def main():
     trio.run(maincore)
 
-class MailEngine:
+from ...core.engine import BaseEngine, EventType
+
+class MailEngine(BaseEngine):
     def __init__(self, console=None):
+        super().__init__()
         self.console = console
 
-    async def run_search(self, email, on_complete=None, timeout=30, log_callback=None):
-        # Import Modules
-        modules = import_submodules("sentinelle.engines.mail.modules")
-        websites = get_functions(modules, None)
+    async def run(self, email, timeout=30, max_concurrent=20, websites=None, **kwargs):
+        # Use provided websites or load them if not provided
+        if websites is None:
+            modules = import_submodules("sentinelle.engines.mail.modules")
+            websites = get_functions(modules, None)
         
-        if log_callback:
-            log_callback(f"🚀 Initializing scan for {email} ({len(websites)} modules loaded)")
+        self.log(f"🚀 Initializing scan for {email} ({len(websites)} modules loaded)")
+
+        # Capacity limiter to avoid overwhelming the network/system
+        limiter = trio.CapacityLimiter(max_concurrent)
 
         # Def the async client
         async with httpx.AsyncClient(timeout=timeout) as client:
             out = []
-            async with trio.open_nursery() as nursery:
-                for website in websites:
-                    nursery.start_soon(self._wrapped_launch, website, email, client, out, on_complete, log_callback)
+            try:
+                async with trio.open_nursery() as nursery:
+                    for website in websites:
+                        nursery.start_soon(self._wrapped_launch, website, email, client, out, limiter)
+            except (Exception, BaseException) as e:
+                if isinstance(e, KeyboardInterrupt):
+                    raise
+                self.error(f"⚠️ Scan partially interrupted: {str(e)}")
             
             # Sort by modules names
             out = sorted(out, key=lambda i: i['name'])
+            self.emit(EventType.COMPLETE, data=out)
             return out
 
-    async def _wrapped_launch(self, module, email, client, out, on_complete, log_callback=None):
+    async def _wrapped_launch(self, module, email, client, out, limiter=None):
         name = str(module).split('<function ')[1].split(' ')[0] if '<function ' in str(module) else str(module)
-        if log_callback:
-            log_callback(f"📡 Querying {name}...")
-            
-        initial_len = len(out)
-        await launch_module(module, email, client, out)
         
-        if len(out) > initial_len:
-            res = out[-1]
-            if on_complete:
-                on_complete(res)
-            if log_callback:
+        async with (limiter or trio.CapacityLimiter(100)):
+            self.log(f"📡 Querying {name}...")
+                
+            initial_len = len(out)
+            try:
+                await launch_module(module, email, client, out)
+            except Exception as e:
+                self.log(f"⚠️ Error in {name}: {str(e)}")
+            
+            # Extract result
+            res = out[-1] if len(out) > initial_len else {"name": name, "domain": name, "exists": False, "error": False, "rateLimit": False}
+            
+            # Emit data event for UI update
+            self.emit(EventType.DATA, data=res)
+            
+            # Advance progress
+            self.progress(advance=1)
+                
+            if len(out) > initial_len:
+                res = out[-1]
                 if res.get('exists'):
-                    log_callback(f"✅ Found on {res['domain']}")
+                    self.log(f"✅ Found on {res['domain']}")
                 elif res.get('error'):
-                    log_callback(f"⚠️ Error on {res['domain']}")
+                    self.log(f"⚠️ Error on {res['domain']}")

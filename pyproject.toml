@@ -28,7 +28,8 @@ dependencies = [
     "pillow>=11.3.0",
     "beautifulsoup4>=4.12.0",
     "termcolor>=2.3.0",
-    "chardet>=5.2.0"
+    "chardet>=5.2.0",
+    "scapy"
 ]
 
 [project.scripts]

@@ -24,8 +24,8 @@ from .state import state
 from .ui.renderer import Renderer
 from .modules.runner import ModuleRunner
 from .modules.registry import registry
-import logging
 from .logging_config import configure_logging, tail_log_to_state
+
 
 class App:
     def __init__(self):
@@ -38,14 +38,14 @@ class App:
         _logging.getLogger("sentinelle").info("Application initialized")
 
         self.runner = ModuleRunner(self.renderer.console)
-        
+
     def start(self):
         self.renderer.clear()
         self._show_loading()
-        
+
         # Check and warn about missing API keys
         self._check_api_keys()
-        
+
         # Main loop
         while True:
             # Refresh logs: if no activity logs are present, populate them from the log file for traceability
@@ -54,18 +54,50 @@ class App:
 
             self.renderer.render_dashboard()
             self.renderer.print_menu()
-            
+
             choice = input("\n> ")
-            
+
             if choice == "0" or choice.lower() == "q":
                 self.renderer.print_message("[yellow]Exiting SENTINNELLE...[/]")
                 break
-                
+
             choice_lower = choice.lower()
             if choice_lower == "h":
                 self._show_help()
                 continue
-                
+
+            if choice_lower == "r":
+                # Refresh module discovery and statuses
+                registry.discover()
+                registry.probe_modules()
+                self.renderer.print_message("[green]Modules refreshed.[/]")
+                continue
+
+            if choice_lower == "m":
+                # Show modules with indexes and allow selection
+                self.renderer.console.print("\n[bold cyan]Available Modules:[/]")
+                for i, module in enumerate(registry.get_all(), 1):
+                    self.renderer.console.print(
+                        f"{i}. {module.name} [{module.status}] v{module.version or '-'} "
+                        f"({module.load_time or '-'}s)"
+                    )
+                sel = input("\nSelect module number to run (or Enter to cancel): ").strip()
+                if sel:
+                    try:
+                        idx = int(sel) - 1
+                        module_def = registry.get_by_index(idx)
+                        if module_def:
+                            self._run_module(module_def)
+                        else:
+                            self.renderer.print_message("[red]Invalid module index[/]")
+                    except ValueError:
+                        self.renderer.print_message("[red]Invalid selection[/]")
+                continue
+
+            if choice_lower == "s":
+                self.renderer.print_message("[dim]Use the module menu (M) or number keys to start modules.[/]")
+                continue
+
             module_def = None
             if choice_lower == "e":
                 module_def = registry.get_by_id("email")
@@ -86,11 +118,18 @@ class App:
                 self._run_module(module_def)
             else:
                 self.renderer.print_message("[red]Invalid choice or input[/]")
-                
+
     def _run_module(self, module_def):
         if hasattr(self.runner, module_def.runner_method):
             method = getattr(self.runner, module_def.runner_method)
-            method()
+            try:
+                method()
+            except KeyboardInterrupt:
+                self.renderer.console.print("\n[yellow]⚠ Process interrupted by user.[/]")
+            except Exception as e:
+                self.renderer.console.print(f"\n[red]❌ Unexpected error: {str(e)}[/]")
+                import logging
+                logging.getLogger("sentinelle").error(f"Error running {module_def.name}: {e}", exc_info=True)
         else:
             self.renderer.print_message(f"[red]Method {module_def.runner_method} not implemented[/]")
 
@@ -98,39 +137,38 @@ class App:
         from rich.panel import Panel
         from rich.table import Table
         from rich import box
-        
+
         table = Table(box=box.MINIMAL)
         table.add_column("Key", style="cyan")
         table.add_column("Action", style="white")
-        table.add_row("1", "Email OSINT ")
-        table.add_row("2", "Phone Intelligence")
-        table.add_row("3", "IP Intelligence")
-        table.add_row("4", "Social Media Search")
-        table.add_row("E", "Quick run: Email OSINT")
-        table.add_row("P", "Quick run: Phone Intel")
-        table.add_row("I", "Quick run: IP Intel")
-        table.add_row("S", "Quick run: Social Media Search")
+        table.add_row("1..N", "Select module by number")
+        table.add_row("E", "Quick run: Email OSINT (if available)")
+        table.add_row("P", "Quick run: Phone Intelligence (if available)")
+        table.add_row("I", "Quick run: IP Intelligence (if available)")
+        table.add_row("M", "Open Modules menu")
+        table.add_row("R", "Refresh module discovery/status")
         table.add_row("H", "Show this help screen")
         table.add_row("Q", "Quit application")
-        
+
         self.renderer.console.print(Panel(table, title="Help & Shortcuts", border_style="cyan"))
+
         input("\nPress Enter to continue...")
-                
+
     def _check_api_keys(self):
         """Check for required API keys and warn if missing"""
         missing_keys = []
         if not os.getenv('OPENCAGE_API_KEY'):
             missing_keys.append('OPENCAGE_API_KEY (Phone Intelligence GPS)')
-        
+
         if missing_keys:
             self.renderer.print_message("\n[yellow]⚠️  Missing API Keys:[/]")
             for key in missing_keys:
                 self.renderer.print_message(f"  • {key}")
             self.renderer.print_message("[dim]Set them in .env file or environment variables[/]\n")
             input("Press Enter to continue...")
-    
+
     def _show_loading(self):
-         with Progress(
+        with Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
             console=self.renderer.console,
@@ -139,6 +177,7 @@ class App:
             for i in range(100):
                 progress.update(task, advance=1)
                 time.sleep(0.01)
+
 
 def main():
     app = App()

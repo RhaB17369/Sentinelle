@@ -1,30 +1,95 @@
-from typing import Callable, Optional, Any
+from typing import Callable, Optional, Any, List, Dict
+from datetime import datetime
+import re
+import threading
+import sys
+import io
+import warnings
+import logging
+import os
+from typing import Callable, Optional, Any, List, Dict
+from datetime import datetime
+import re
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 from rich.table import Table
 from rich.panel import Panel
-from rich.console import Console, Group
+from rich.console import Console, Group, RenderableType
 from rich.live import Live
+from rich.rule import Rule
+from rich.layout import Layout
 from rich import box
 
+# Military-grade UI synchronization
+_ui_lock = threading.Lock()
 
-class ProgressManager:
-    """Unified manager for progress + dynamic table rendering.
+class FDRedirector:
+    """Rigorous FD-level redirection to capture C-level and subprocess output."""
+    def __init__(self, log_func):
+        self.log_func = log_func
+        self.pipe_out, self.pipe_in = os.pipe()
+        # Set pipe_out to non-blocking
+        import fcntl
+        flags = fcntl.fcntl(self.pipe_out, fcntl.F_GETFL)
+        fcntl.fcntl(self.pipe_out, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+        
+        self.original_stdout_fd = os.dup(sys.stdout.fileno())
+        self.original_stderr_fd = os.dup(sys.stderr.fileno())
+        self.thread = threading.Thread(target=self._read_pipe, daemon=True)
+        self.running = False
 
-    Usage:
-      pm = ProgressManager(console)
-      pm.create(title, target, columns)
-      with pm.live_panel(title):
-          pm.update(...)
+    def start(self):
+        self.running = True
+        os.dup2(self.pipe_in, sys.stdout.fileno())
+        os.dup2(self.pipe_in, sys.stderr.fileno())
+        self.thread.start()
 
-    The manager exposes minimal helpers so modules don't replicate Progress/Table creation.
+    def stop(self):
+        self.running = False
+        os.dup2(self.original_stdout_fd, sys.stdout.fileno())
+        os.dup2(self.original_stderr_fd, sys.stderr.fileno())
+        os.close(self.pipe_in)
+        os.close(self.original_stdout_fd)
+        os.close(self.original_stderr_fd)
+
+    def _read_pipe(self):
+        import select
+        while self.running:
+            try:
+                r, _, _ = select.select([self.pipe_out], [], [], 0.1)
+                if r:
+                    data = os.read(self.pipe_out, 4096)
+                    if not data: break
+                    for line in data.decode('utf-8', errors='ignore').splitlines():
+                        if line.strip():
+                            self.log_func(line.strip())
+            except (Exception, OSError):
+                break
+        os.close(self.pipe_out)
+
+class LogHandler(logging.Handler):
+    def __init__(self, log_func):
+        super().__init__()
+        self.log_func = log_func
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            self.log_func(msg)
+        except Exception:
+            pass
+
+class UIContext:
+    """A context-managed UI session for a specific task.
+    
+    Handles the Live display, progress, table, and activity logs.
     """
-
-    def __init__(self, console: Optional[Console] = None):
-        self.console = console or Console()
-
-    def create(self, target_name: str, total: int, table_columns: list[tuple[str, dict]]):
-        """Create the Progress and Table objects for the run."""
-        progress = Progress(
+    def __init__(self, console: Console, title: str, total: int, target: str, columns: List[tuple], refresh_per_second: int = 10):
+        self.console = console
+        self.title = title
+        self.activity_log: List[str] = []
+        self.refresh_per_second = refresh_per_second
+        
+        # 1. Create Progress
+        self.progress = Progress(
             SpinnerColumn(spinner_name="dots"),
             TextColumn("[bold blue]{task.fields[target]}[/]"),
             BarColumn(bar_width=None),
@@ -33,9 +98,10 @@ class ProgressManager:
             TextColumn("[dim]{task.description}...[/]"),
             console=self.console,
         )
-
-        # Create a visually clear and structured table with sensible defaults
-        table = Table(
+        self.task_id = self.progress.add_task("Processing", total=total, target=target)
+        
+        # 2. Create Table
+        self.table = Table(
             show_header=True,
             header_style="bold white",
             box=box.ROUNDED,
@@ -43,131 +109,203 @@ class ProgressManager:
             border_style="bright_black",
             row_styles=["", "dim"],
             show_edge=True,
-            pad_edge=True,
             show_lines=True,
-            highlight=True,
+        )
+        self.column_names = []
+        for col, kwargs in columns:
+            self.table.add_column(col, **kwargs)
+            self.column_names.append(col)
+
+        self._live: Optional[Live] = None
+        self._fd_redirector: Optional[FDRedirector] = None
+        self._log_handler: Optional[LogHandler] = None
+        self._layout = Layout()
+        self._setup_layout()
+
+    def _setup_layout(self):
+        """Partition the screen for absolute control."""
+        self._layout.split(
+            Layout(name="header", size=3),
+            Layout(name="main", ratio=1),
+            Layout(name="footer", size=3),
+        )
+        self._layout["main"].split_row(
+            Layout(name="logs", ratio=1),
+            Layout(name="results", ratio=2),
         )
 
-        column_names = []
-        for col, kwargs in table_columns:
-            # sensible defaults for readability
-            defaults = {"no_wrap": False, "overflow": "fold"}
-            if "justify" not in kwargs:
-                if "status" in col.lower():
-                    defaults["justify"] = "center"
-                elif "url" in col.lower():
-                    defaults["justify"] = "left"
-                else:
-                    defaults["justify"] = "left"
+    def __enter__(self):
+        with _ui_lock:
+            # Absolute warning suppression
+            warnings.filterwarnings("ignore")
+            
+            # Redirect logging
+            self._log_handler = LogHandler(self.log)
+            logging.getLogger().addHandler(self._log_handler)
+            
+            # Force close any existing active context
+            manager = get_manager()
+            if manager._active_context and manager._active_context._live:
+                try:
+                    manager._active_context._live.stop()
+                except:
+                    pass
+            
+            manager._active_context = self
+            
+            # 1. Capture original stdout/stderr FDs to protect them for Live
+            real_stdout_fd = os.dup(sys.stdout.fileno())
+            
+            # 2. Start FD-level redirection (redirects FD 1 and 2 to logs)
+            self._fd_redirector = FDRedirector(self.log)
+            self._fd_redirector.start()
 
-            merged = {**defaults, **kwargs}
-            table.add_column(col, **merged)
-            column_names.append(col)
+            # 3. Create a dedicated console for Live using the protected FD copy
+            # Use the original raw stream to ensure ANSI sequences work
+            self._live_console = Console(file=os.fdopen(real_stdout_fd, 'w'), force_terminal=True)
 
-        # Store column order for dict-based helpers
-        setattr(table, "_pm_column_names", column_names)
+            self._live = Live(
+                self._layout,
+                console=self._live_console,
+                refresh_per_second=self.refresh_per_second,
+                screen=True,  # Alternate Buffer: The nuclear option
+                auto_refresh=True,
+            )
+            self._live.start()
+        return self
 
-        task_id = progress.add_task("Processing", total=total, target=target_name)
-        return progress, table, task_id
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        with _ui_lock:
+            if self._live:
+                self._live.stop()
 
-    def render_display(self, progress: Progress, table: Table, activity_log: list[str], progress_title: str = "Progress", activity_title: str = "Real-time Activity"):
-        """Return a Group suitable for Live.update() with a cleaner, more professional look."""
-        # Use a more compact representation for logs
-        log_lines = []
-        for log in activity_log[-5:]:
-            log_lines.append(f"[yellow]»[/] [dim]{log}[/]")
-        log_text = "\n".join(log_lines)
+            # Stop FD redirection and restore original streams
+            if self._fd_redirector:
+                self._fd_redirector.stop()
+
+            # Restore logging
+            if self._log_handler:
+                logging.getLogger().removeHandler(self._log_handler)
+            
+            if get_manager()._active_context == self:
+                get_manager()._active_context = None
+
+    def _render_layout(self):
+        """Update the layout components with current state."""
+        # Header
+        self._layout["header"].update(Rule(f"[bold cyan] SENTINELLE INTELLIGENCE: {self.title} [/]", style="cyan"))
         
-        return Group(
-            # Progress bar without its own panel to avoid border stacking
-            progress,
-            # Single Activity panel with a cleaner border
-            Panel(log_text or "[dim]Waiting for data...[/]", title=f"[bold yellow]{activity_title}[/]", border_style="bright_black", height=8),
-            # Table directly in the group
-            table,
-        )
+        # Footer / Progress
+        self._layout["footer"].update(Panel(self.progress, border_style="cyan"))
+        
+        # Logs
+        log_lines = []
+        for log in self.activity_log[-15:]:  # More logs in alternate screen
+            log_lines.append(f"[yellow]»[/] {log}")
+        log_text = "\n".join(log_lines) or "[dim]Waiting for intelligence...[/]"
+        self._layout["logs"].update(Panel(log_text, title="[bold yellow]ACTIVITY[/]", border_style="bright_black"))
+        
+        # Results Table
+        self._layout["results"].update(self.table)
 
-    def live_context(self, title: str, progress: Progress, table: Table, activity_log: list[str], refresh_per_second: int = 4, progress_title: str = "Progress", activity_title: str = "Activity"):
-        """Context manager for a Live panel that contains progress, activity log and table.
-
-        Yields the Live objeca cct so callers can call live.update(pm.render_display(...)) when they mutate progress or the activity_log.
-        """
-        return Live(Panel(self.render_display(progress, table, activity_log, progress_title, activity_title), title=title), console=self.console, refresh_per_second=refresh_per_second)
-
-    def update_task(self, progress: Progress, task_id: Any, advance: int = 1, description: Optional[str] = None, completed: Optional[int] = None):
-        if completed is not None:
-            progress.update(task_id, description=description or progress.tasks[task_id].description, completed=completed)
-        else:
-            progress.update(task_id, description=description or progress.tasks[task_id].description, advance=advance)
-
-    def add_table_row(self, table: Table, *columns, style: Optional[str] = None):
-        """Add a simple row by positional columns. Optionally apply a row style."""
-        if style:
-            table.add_row(*columns, style=style)
-        else:
-            table.add_row(*columns)
-
-    def add_table_row_by_dict(self, table: Table, row: dict, highlight: Optional[str] = None):
-        """Add a row by mapping keys to column names defined at creation.
-
-        Example: pm.add_table_row_by_dict(table, {"Site": "github", "Status": "OK", "URL": "https://..."})
-        """
-        colnames = getattr(table, "_pm_column_names", None)
-        if not colnames:
-            # No mapping available — fall back to positional behavior
-            table.add_row(*[str(v) for v in row.values()])
-            return
-
-        cells = []
-        for name in colnames:
-            val = row.get(name, "")
-            cells.append(str(val) if val is not None else "")
-        table.add_row(*cells, style=highlight)
-
-    def update_table_row(self, table: Table, key_col: str, key_value: str, new_values: dict) -> bool:
-        """Find a row where the value in key_col equals key_value and update cells with new_values.
-
-        Returns True if a row was updated, False otherwise.
-        """
-        colnames = getattr(table, "_pm_column_names", None)
-        if not colnames:
-            return False
+    def log(self, message: str):
+        """Add a timestamped log message and update layout."""
+        if not message: return
+        clean_msg = re.sub(r'\x1b\[[0-9;]*m', '', str(message)).strip()
+        if not clean_msg: return
+        
+        timestamp = datetime.now().strftime('%H:%M:%S')
+        self.activity_log.append(f"[[dim]{timestamp}[/]] {clean_msg}")
+        if len(self.activity_log) > 100: 
+            self.activity_log.pop(0)
+            
+        self._render_layout()
+        
+        # Also sync to global app state
         try:
-            key_idx = colnames.index(key_col)
-        except ValueError:
-            return False
+            from ..state import state
+            state.add_log(clean_msg, "white")
+        except:
+            pass
 
-        columns = table.columns
-        # number of data rows is the max length of column _cells
-        n_rows = max((len(getattr(c, "_cells", [])) for c in columns), default=0)
-        updated = False
-        for i in range(n_rows):
-            cell_val = ""
-            if key_idx < len(columns) and i < len(getattr(columns[key_idx], "_cells", [])):
-                cell_val = columns[key_idx]._cells[i]
-            if str(cell_val) == str(key_value):
-                # apply updates
-                for k, v in new_values.items():
-                    if k in colnames:
-                        idx = colnames.index(k)
-                        col = columns[idx]
-                        cells = getattr(col, "_cells", [])
-                        # ensure list is long enough
-                        while len(cells) < n_rows:
-                            cells.append("")
-                        cells[i] = str(v)
-                        col._cells = cells
-                updated = True
-        return updated
+    def update_progress(self, advance: int = 1, completed: Optional[int] = None, total: Optional[int] = None, description: Optional[str] = None, **kwargs):
+        """Bulletproof progress update and layout refresh."""
+        update_data = {}
+        if description is not None: update_data["description"] = description
+        if completed is not None: update_data["completed"] = completed
+        if total is not None: update_data["total"] = total
+        
+        if advance is not None and completed is None and total is None:
+            update_data["advance"] = advance
+            
+        for k in ['advance', 'completed', 'total', 'description']:
+            if k in kwargs and k not in update_data:
+                update_data[k] = kwargs[k]
+
+        try:
+            self.progress.update(self.task_id, **update_data)
+            self._render_layout()
+        except Exception:
+            pass
+
+    def add_row(self, data: Dict[str, Any], style: Optional[str] = None):
+        cells = []
+        for name in self.column_names:
+            val = data.get(name, "")
+            cells.append(str(val))
+        self.table.add_row(*cells, style=style)
+        self._render_layout()
+
+    def refresh(self):
+        """Force a layout update."""
+        self._render_layout()
 
 
-# Convenience singleton-like factory used by modules
-_default_pm: Optional[ProgressManager] = None
+    def pause(self):
+        """Stop live display and wait for user input."""
+        if self._live:
+            self._live.stop()
+        self.console.print("\n[dim]Press Enter to return to menu...[/]")
+        input()
+
+
+class ProgressManager:
+    """Unified manager for UI tasks."""
+    def __init__(self, console: Optional[Console] = None):
+        self.console = console or Console()
+        self._active_context: Optional[UIContext] = None
+
+    def session(self, title: str, target: str, total: int, columns: List[tuple], refresh_per_second: int = 10) -> UIContext:
+        """Create a new UI session context."""
+        return UIContext(self.console, title, total, target, columns, refresh_per_second)
+
+    def create(self, target_name: str, total: int, table_columns: List[tuple]):
+        """Legacy / Compatibility method for raw progress/table access."""
+        ctx = self.session("Legacy", target_name, total, table_columns)
+        
+        class TableProxy:
+            def __init__(self, table, context):
+                self.table = table
+                self.context = context
+            def add_row(self, *args, **kwargs):
+                if args:
+                    self.table.add_row(*args, **kwargs)
+                elif "data" in kwargs:
+                    self.context.add_row(kwargs["data"])
+                self.context.refresh()
+            def __getattr__(self, name):
+                return getattr(self.table, name)
+
+        return ctx.progress, TableProxy(ctx.table, ctx), ctx.task_id
+
+
+# Singleton instance with global scope
+_instance: Optional[ProgressManager] = None
 
 def get_manager(console: Optional[Console] = None) -> ProgressManager:
-    global _default_pm
-    if _default_pm is None:
-        _default_pm = ProgressManager(console)
+    global _instance
+    if _instance is None:
+        _instance = ProgressManager(console)
     elif console is not None:
-        _default_pm.console = console
-    return _default_pm
+        _instance.console = console
+    return _instance

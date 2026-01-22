@@ -1,7 +1,30 @@
+import sys
+from io import StringIO
 from pathlib import Path
 import logging
 from logging.handlers import RotatingFileHandler
 from rich.logging import RichHandler
+
+class LogRedirector:
+    """Context manager to temporarily redirect logs to a callback."""
+    def __init__(self, callback: callable):
+        self.callback = callback
+
+    def __enter__(self):
+        self._handler = logging.StreamHandler(self)
+        self._handler.setFormatter(logging.Formatter("%(message)s"))
+        logging.getLogger("sentinelle").addHandler(self._handler)
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        logging.getLogger("sentinelle").removeHandler(self._handler)
+
+    def write(self, m):
+        if m.strip():
+            self.callback(m.strip())
+
+    def flush(self):
+        pass
 
 DEFAULT_LOG_DIR = Path.home() / ".local" / "share" / "sentinelle"
 DEFAULT_LOG_FILE = DEFAULT_LOG_DIR / "sentinelle.log"
@@ -32,6 +55,11 @@ def configure_logging(console, log_dir: Path | None = None, verbose: bool = Fals
 
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.DEBUG if verbose else logging.INFO)
+
+    # Quiet down high-frequency library logs that interfere with Rich Live UI
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("trio").setLevel(logging.WARNING)
 
     # Avoid adding duplicate handlers on reconfigure
     if not any(isinstance(h, RotatingFileHandler) and getattr(h, "baseFilename", None) == str(log_file) for h in root_logger.handlers):

@@ -17,6 +17,7 @@ class AppState:
     blockchain_traces: int = 0
     
     activity_log: List[ActivityLog] = field(default_factory=list)
+    privileged_probes_enabled: bool = False
     
     def add_log(self, message: str, style: str = "green"):
         self.activity_log.append(ActivityLog(datetime.now(), message, style))
