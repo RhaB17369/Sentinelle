@@ -119,6 +119,8 @@ class UIContext:
         self._live: Optional[Live] = None
         self._fd_redirector: Optional[FDRedirector] = None
         self._log_handler: Optional[LogHandler] = None
+        self._stdout = None
+        self._stderr = None
         self._layout = Layout()
         self._setup_layout()
 
@@ -138,6 +140,10 @@ class UIContext:
         with _ui_lock:
             # Absolute warning suppression
             warnings.filterwarnings("ignore")
+            
+            # Save original stream objects before redirection
+            self._stdout = sys.stdout
+            self._stderr = sys.stderr
             
             # Redirect logging
             self._log_handler = LogHandler(self.log)
@@ -262,11 +268,34 @@ class UIContext:
 
 
     def pause(self):
-        """Stop live display and wait for user input."""
+        """Transition to static consultation mode and wait for user acknowledgment."""
         if self._live:
+            # Update footer to consultation mode
+            self._layout["footer"].update(Panel(
+                "[bold blink green] CONSULTATION MODE [/] - [white]Intelligence gathered. Press Enter to commit and exit...[/]", 
+                border_style="green",
+                padding=(0, 1)
+            ))
+            self._render_layout()
+            
+            # Use original stdin for the blocking call to avoid any redirection issues
+            try:
+                # We stay in the alternate buffer during the wait
+                input()
+            except EOFError:
+                pass
+            
+            # Stop Live (this switches back to main buffer)
             self._live.stop()
-        self.console.print("\n[dim]Press Enter to return to menu...[/]")
-        input()
+            self._live = None
+
+        # Absolute Persistence: Print the final table and a summary to the permanent STDOUT
+        self._stdout.write("\n")
+        persistent_console = Console(file=self._stdout)
+        persistent_console.print(Rule(f"[bold cyan] FINAL REPORT: {self.title} [/]", style="cyan"))
+        persistent_console.print(self.table)
+        persistent_console.print(f"[dim]Scan completed at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}[/]\n")
+
 
 
 class ProgressManager:
