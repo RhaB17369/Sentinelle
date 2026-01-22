@@ -1,4 +1,4 @@
-from typing import Callable, Optional, Any, List, Dict
+from typing import Callable, Optional, Any, List, Dict, Union
 from datetime import datetime
 import re
 import threading
@@ -7,9 +7,6 @@ import io
 import warnings
 import logging
 import os
-from typing import Callable, Optional, Any, List, Dict
-from datetime import datetime
-import re
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 from rich.table import Table
 from rich.panel import Panel
@@ -17,6 +14,7 @@ from rich.console import Console, Group, RenderableType
 from rich.live import Live
 from rich.rule import Rule
 from rich.layout import Layout
+from rich.tree import Tree
 from rich import box
 
 # Military-grade UI synchronization
@@ -116,6 +114,7 @@ class UIContext:
             self.table.add_column(col, **kwargs)
             self.column_names.append(col)
 
+        self.consultation_mode = False
         self._live: Optional[Live] = None
         self._fd_redirector: Optional[FDRedirector] = None
         self._log_handler: Optional[LogHandler] = None
@@ -129,6 +128,7 @@ class UIContext:
         self._layout.split(
             Layout(name="header", size=3),
             Layout(name="main", ratio=1),
+            Layout(name="nav", size=3),
             Layout(name="footer", size=3),
         )
         self._layout["main"].split_row(
@@ -198,11 +198,31 @@ class UIContext:
 
     def _render_layout(self):
         """Update the layout components with current state."""
+        from rich.text import Text
+        
         # Header
         self._layout["header"].update(Rule(f"[bold cyan] SENTINELLE INTELLIGENCE: {self.title} [/]", style="cyan"))
         
+        # Navigation Bar (Dedicated to scrolling)
+        nav_text = Text()
+        nav_text.append("Commands: ", style="bold white")
+        nav_text.append("[↑/↓] Scroll ", style="cyan")
+        nav_text.append("[PgUp/PgDn] Page ", style="cyan")
+        nav_text.append("[Home/End] Top/Bottom ", style="cyan")
+        nav_text.append("[Enter] Continue ", style="cyan")
+        nav_text.append("[H]elp ", style="cyan")
+        nav_text.append("[?]Tips", style="bright_black")
+        self._layout["nav"].update(Panel(nav_text, border_style="bright_black"))
+
         # Footer / Progress
-        self._layout["footer"].update(Panel(self.progress, border_style="cyan"))
+        if not self.consultation_mode:
+            self._layout["footer"].update(Panel(self.progress, border_style="cyan"))
+        else:
+            self._layout["footer"].update(Panel(
+                "[bold blink green] CONSULTATION MODE [/] - [white]Intelligence gathered. Press Enter to commit and exit...[/]", 
+                border_style="green",
+                padding=(0, 1)
+            ))
         
         # Logs
         log_lines = []
@@ -271,11 +291,7 @@ class UIContext:
         """Transition to static consultation mode and wait for user acknowledgment."""
         if self._live:
             # Update footer to consultation mode
-            self._layout["footer"].update(Panel(
-                "[bold blink green] CONSULTATION MODE [/] - [white]Intelligence gathered. Press Enter to commit and exit...[/]", 
-                border_style="green",
-                padding=(0, 1)
-            ))
+            self.consultation_mode = True
             self._render_layout()
             
             # Use original stdin for the blocking call to avoid any redirection issues
