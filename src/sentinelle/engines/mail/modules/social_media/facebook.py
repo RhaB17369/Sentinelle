@@ -26,7 +26,7 @@ async def facebook(email, client, out):
         # Extract CSRF token from the response
         token = response.text.split('{"config":{"csrf_token":"')[1].split('"')[0]
     except Exception as e:
-        print(f"Error occurred while fetching CSRF token: {e}")
+        # Error logged via output status
         out.append({"name": name, "domain": domain, "method": method, "frequent_rate_limit": frequent_rate_limit,
                     "rateLimit": True,
                     "exists": False,
@@ -81,7 +81,7 @@ async def facebook(email, client, out):
                         "phoneNumber": None,
                         "others": None})
     except Exception as e:
-        print(f"Error occurred during POST request: {e}")
+        # Error logged via output status
         out.append({"name": name, "domain": domain, "method": method, "frequent_rate_limit": frequent_rate_limit,
                     "rateLimit": True,
                     "exists": False,

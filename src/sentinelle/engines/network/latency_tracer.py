@@ -9,11 +9,11 @@ import aiodns
 from typing import List, Dict, Any, Tuple, Optional
 from scapy.all import IP, TCP, ICMP, sr1, conf, sr
 
+from ...core.engine import BaseEngine, EventType
 
-logger = logging.getLogger(__name__)
+__version__ = "2.1.0"
 
-
-class LatencyTracer:
+class LatencyTracer(BaseEngine):
     """
     Military-grade network intelligence tool for SIGINT.
     Advanced Android/Mobile detection via Jitter & TCP signatures.
@@ -43,19 +43,127 @@ class LatencyTracer:
     ]
 
     def __init__(self):
+        super().__init__()
         self.system = platform.system().lower()
         self._cache = {}
-        self.resolver = aiodns.DNSResolver()
+        # Create resolver lazily to avoid requiring an event loop at import/test time
+        self.resolver = None
+
+    async def run(self, target: str, **kwargs) -> Dict[str, Any]:
+        self.log(f"📡 Initializing SIGINT analysis for {target}...")
+        self.progress(advance=0, total=6, description="Initializing")
+
+        results = {"target": target, "timestamp": time.time()}
+
+        # 1. Reverse DNS / Semantic Geo
+        self.progress(advance=1, description="Semantic Geo (PTR)")
+        geo = await self.get_semantic_geo(target)
+        if geo:
+            results["semantic_geo"] = geo
+            self.emit(EventType.DATA, data={"Category": "DNS", "Property": "Hostname", "Value": geo.get("ptr", "Unknown")})
+            if geo.get("detected_city_name"):
+                self.emit(EventType.DATA, data={"Category": "Geo", "Property": "Clue", "Value": geo["detected_city_name"]})
+
+        # 2. ASN Info
+        self.progress(advance=1, description="ASN Intelligence")
+        asn = await self.get_asn_info(target)
+        if asn:
+            results["asn"] = asn
+            self.emit(EventType.DATA, data={"Category": "Network", "Property": "ASN", "Value": f"AS{asn.get('asn')} ({asn.get('owner')})"})
+            if asn.get("is_known_vpn"):
+                self.emit(EventType.DATA, data={"Category": "Security", "Property": "Type", "Value": "VPN/Hosting Detected"})
+
+        # 3. Path MTU (Privileged)
+        self.progress(advance=1, description="Path MTU Discovery")
+        mtu_data = await self.discover_path_mtu(target)
+        if mtu_data.get("status") != "permission_denied":
+            results["mtu"] = mtu_data
+            self.emit(EventType.DATA, data={"Category": "Network", "Property": "MTU", "Value": f"{mtu_data.get('mtu')} ({mtu_data.get('intelligence')})"})
+        else:
+            self.log("[yellow]⚠️ MTU discovery requires root/elevated privileges[/]")
+
+        # 4. ICMP/TCP RTT & Jitter
+        self.progress(advance=1, description="RTT & Jitter Analysis")
+        ping_res = await self.ping(target, count=5)
+        if ping_res.get("status") == "reachable":
+            results["ping"] = ping_res
+            rtt = ping_res.get("rtt_ms", {})
+            self.emit(EventType.DATA, data={"Category": "Latency", "Property": "Avg RTT", "Value": f"{rtt.get('avg')}ms"})
+            self.emit(EventType.DATA, data={"Category": "Latency", "Property": "Jitter", "Value": f"{rtt.get('mdev')}ms"})
+            
+            # Distance estimate
+            dist = ping_res.get("distance_estimate", {}).get("km")
+            if dist:
+                self.emit(EventType.DATA, data={"Category": "Geo", "Property": "Est. Distance", "Value": f"~{int(dist)} km"})
+
+        # 5. Clock Skew (Stealthy Fingerprinting)
+        self.progress(advance=1, description="Clock Skew Fingerprinting")
+        skew = await self.measure_clock_skew(target)
+        if skew is None:
+            skew = await self.measure_icmp_clock_skew(target)
+        
+        if skew is not None:
+            results["clock_skew"] = skew
+            self.emit(EventType.DATA, data={"Category": "Fingerprint", "Property": "Clock Skew", "Value": f"{skew} Hz"})
+
+        # 6. Final Path Analysis
+        self.progress(advance=1, description="Path Analysis (Traceroute)")
+        path = await self.traceroute(target)
+        if path:
+            results["path"] = path
+            self.emit(EventType.DATA, data={"Category": "Network", "Property": "Hops", "Value": str(len(path))})
+
+        self.progress(advance=1, description="SIGINT complete")
+        self.emit(EventType.COMPLETE, data=results)
+        return results
+
+    def _ensure_resolver(self):
+        """Instantiate aiodns resolver if needed; fail gracefully if not possible."""
+        if self.resolver is None:
+            try:
+                self.resolver = aiodns.DNSResolver()
+            except Exception:
+                logger.exception("failed to create aiodns DNSResolver")
+                self.resolver = None
+
+    def _is_elevated(self) -> bool:
+        """Return True if running with administrative privileges (root on Unix, Admin on Windows)."""
+        try:
+            if self.system == "windows":
+                try:
+                    import ctypes
+                    return ctypes.windll.shell32.IsUserAnAdmin() != 0
+                except Exception:
+                    return False
+            else:
+                import os
+                return getattr(os, 'geteuid', lambda: -1)() == 0
+        except Exception:
+            logger.exception("failed to determine privilege level")
+            return False
+
+    def _elevation_check_response(self, action_name: str) -> Dict[str, Any]:
+        """Return a standardized permission-denied response for privileged actions."""
+        msg = (f"{action_name} requires administrative privileges (root/CAP_NET_RAW). "
+               "Please run the program with elevated privileges.")
+        logger.warning(msg)
+        return {'status': 'permission_denied', 'message': msg}
 
     async def get_semantic_geo(self, ip: str) -> Dict[str, Any]:
         """Extract geographic clues from Reverse DNS hostnames."""
         try:
             addr = ".".join(reversed(ip.split("."))) + ".in-addr.arpa"
+            self._ensure_resolver()
+            if not self.resolver:
+                return {}
             response = await self.resolver.query(addr, 'PTR')
             if not response:
                 return {}
 
-            hostname = response[0].value.decode().lower()
+            hostname_raw = self._decode_dns_text(response[0])
+            if not hostname_raw:
+                return {}
+            hostname = hostname_raw.lower()
 
             # IATA codes (LHR, CDG, FRA, JFK, etc.)
             iata_patterns = (r"\b(lhr|cdg|fra|jfk|lax|hkg|sin|ams|sfo|sea|"
@@ -75,6 +183,7 @@ class LatencyTracer:
                                        if city_match else None)
             }
         except Exception:
+            logger.exception("get_semantic_geo failed for %s", ip)
             return {}
 
     async def get_asn_info(self, ip: str) -> Dict[str, Any]:
@@ -85,31 +194,38 @@ class LatencyTracer:
 
             rev_ip = ".".join(reversed(ip.split(".")))
             query = f"{rev_ip}.origin.asn.cymru.com"
+            self._ensure_resolver()
+            if not self.resolver:
+                return {}
             response = await self.resolver.query(query, 'TXT')
 
             if response:
-                parts = response[0].text.decode().split("|")
+                first_txt = self._decode_dns_text(response[0])
+                if not first_txt:
+                    return {}
+                parts = first_txt.split("|")
                 asn = parts[0].strip()
 
                 desc_query = f"AS{asn}.asn.cymru.com"
                 desc_res = await self.resolver.query(desc_query, 'TXT')
+                owner = "Unknown"
                 if desc_res:
-                    owner = desc_res[0].text.decode().split("|")[-1].strip()
-                else:
-                    owner = "Unknown"
+                    owner_txt = self._decode_dns_text(desc_res[0])
+                    if owner_txt:
+                        owner = owner_txt.split("|")[-1].strip()
 
                 return {
                     'asn': asn,
-                    'prefix': parts[1].strip(),
-                    'country': parts[2].strip(),
+                    'prefix': parts[1].strip() if len(parts) > 1 else None,
+                    'country': parts[2].strip() if len(parts) > 2 else None,
                     'owner': owner,
                     'is_known_vpn': any(
-                        x in owner.lower()
+                        x in (owner or '').lower()
                         for x in ['vpn', 'proxy', 'tor', 'hosting']
                     )
                 }
         except Exception:
-            pass
+            logger.exception("get_asn_info failed for %s", ip)
         return {}
 
     def _get_from_cache(self, host: str) -> Optional[Dict[str, Any]]:
@@ -127,8 +243,13 @@ class LatencyTracer:
     async def tcp_ping(self, host: str, port: int = 443,
                        timeout: int = 2) -> Dict[str, Any]:
         """Deep Packet Inspection TCP handshake via Scapy."""
+        # This probe uses raw sockets via Scapy; require elevation explicitly.
+        if not self._is_elevated():
+            return self._elevation_check_response('tcp_ping')
+
+        old_verb = getattr(conf, 'verb', None)
+        conf.verb = 0
         try:
-            conf.verb = 0
             syn_packet = IP(dst=host) / TCP(dport=port, flags="S")
             start = time.perf_counter()
 
@@ -150,7 +271,11 @@ class LatencyTracer:
 
             return await self._tcp_ping_fallback(host, port, timeout)
         except Exception:
+            logger.exception("tcp_ping failed for %s:%d", host, port)
             return await self._tcp_ping_fallback(host, port, timeout)
+        finally:
+            if old_verb is not None:
+                conf.verb = old_verb
 
     async def _tcp_ping_fallback(self, host: str, port: int, timeout: int):
         """Standard TCP connect fallback."""
@@ -168,6 +293,7 @@ class LatencyTracer:
                 'method': 'Standard_Connect'
             }
         except Exception:
+            logger.exception("tcp_ping_fallback failed for %s:%d", host, port)
             return {'status': 'failed'}
 
     async def discover_path_mtu(self, host: str) -> Dict[str, Any]:
@@ -175,6 +301,10 @@ class LatencyTracer:
         Binary search for Path MTU discovery via ICMP DF flag.
         Reveals tunneling protocols (VPN/IPsec/Wireguard).
         """
+        # Requires raw sockets/ICMP privileges.
+        if not self._is_elevated():
+            return self._elevation_check_response('discover_path_mtu')
+
         try:
             if self._is_ipv6(host):
                 return {'mtu': 1280, 'type': 'IPv6 Default'}
@@ -197,6 +327,7 @@ class LatencyTracer:
                 'intelligence': self._fingerprint_mtu(mtu)
             }
         except Exception:
+            logger.exception("discover_path_mtu failed for %s", host)
             return {'mtu': 1500, 'intelligence': 'Default/Unknown'}
 
     def _fingerprint_mtu(self, mtu: int) -> str:
@@ -216,6 +347,10 @@ class LatencyTracer:
     async def _get_ip_id_intelligence(self, host: str,
                                       count: int = 5) -> Dict[str, Any]:
         """Analyze IP ID sequence to detect NAT or OS behavior."""
+        # Requires raw socket privileges for ICMP capture.
+        if not self._is_elevated():
+            return self._elevation_check_response('_get_ip_id_intelligence')
+
         try:
             if self._is_ipv6(host):
                 return {'type': 'IPv6 (No ID)'}
@@ -227,11 +362,27 @@ class LatencyTracer:
                 None, lambda: sr(packets * count, timeout=2, verbose=0)
             )
 
-            ids = [pkt[1].id for pkt in ans]
+            ids = []
+            for pair in ans:
+                recv = None
+                if isinstance(pair, tuple) and len(pair) >= 2:
+                    recv = pair[1]
+                elif hasattr(pair, 'id'):
+                    recv = pair
+                if recv and hasattr(recv, 'id'):
+                    ids.append(int(getattr(recv, 'id')))
+
             if len(ids) < 2:
                 return {'type': 'Insufficient Data'}
 
-            diffs = [ids[i+1] - ids[i] for i in range(len(ids)-1)]
+            def _id_diff(a, b):
+                # handle 16-bit wrap-around
+                d = (b - a) & 0xffff
+                if d > 0x7fff:
+                    d -= 0x10000
+                return d
+
+            diffs = [_id_diff(ids[i], ids[i+1]) for i in range(len(ids)-1)]
 
             if all(d == 0 for d in diffs):
                 return {
@@ -253,6 +404,7 @@ class LatencyTracer:
 
             return {'type': 'Mixed', 'values': ids}
         except Exception:
+            logger.exception("ip_id intelligence failed for %s", host)
             return {'type': 'Error during capture'}
 
     async def measure_clock_skew(self, host: str, port: int = 443,
@@ -294,6 +446,7 @@ class LatencyTracer:
             slope = (n * sum_xy - sum_x * sum_y) / denominator
             return round(slope, 2)
         except Exception:
+            logger.exception("measure_clock_skew failed for %s", host)
             return None
 
     async def measure_icmp_clock_skew(self, host: str, count: int = 3) -> Optional[float]:
@@ -301,6 +454,13 @@ class LatencyTracer:
         Estimate target clock skew via ICMP Timestamp Request (Type 13).
         Stealthier alternative when TCP timestamps are blocked.
         """
+        # ICMP timestamp probing requires elevated privileges.
+        if not self._is_elevated():
+            # Returning None is consistent with function signature while providing
+            # a clear permission-denied message via a helper response if desired.
+            logger.warning("measure_icmp_clock_skew requires administrative privileges")
+            return None
+
         try:
             samples = []
             for _ in range(count):
@@ -339,6 +499,7 @@ class LatencyTracer:
             slope = (n * sum_xy - sum_x * sum_y) / denom
             return round(slope, 2)
         except Exception:
+            logger.exception("measure_icmp_clock_skew failed for %s", host)
             return None
 
     def _analyze_tcp_options(self, options: List[Tuple[str, Any]]) -> Dict[str, Any]:
@@ -484,6 +645,7 @@ class LatencyTracer:
 
             return {'host': host, 'status': 'unreachable'}
         except Exception as e:
+            logger.exception("ping failed for %s: %s", host, e)
             return {'host': host, 'status': 'error', 'message': str(e)}
 
     def _classify_link_type(self, avg_rtt: float, jitter: float) -> str:
@@ -618,14 +780,32 @@ class LatencyTracer:
         }
 
     def _extract_all_rtts(self, output: str) -> List[float]:
-        """Extract individual RTT values for statistical analysis."""
-        return [float(m) for m in re.findall(r"time=(\d+\.?\d*)", output)]
+        """Extract individual RTT values for statistical analysis.
+
+        Accepts both dot and comma decimals produced by different locales.
+        """
+        matches = re.findall(r"time=([0-9]+(?:[.,][0-9]+)?)", output)
+        return [float(m.replace(',', '.')) for m in matches]
 
     def _is_ipv6(self, host: str) -> bool:
         try:
             return ipaddress.ip_address(host).version == 6
         except ValueError:
             return False
+
+    def _decode_dns_text(self, entry) -> Optional[str]:
+        """Safely extract text/value bytes from aiodns response entry."""
+        if entry is None:
+            return None
+        txt = getattr(entry, 'text', None) or getattr(entry, 'value', None)
+        if txt is None:
+            return None
+        if isinstance(txt, (bytes, bytearray)):
+            try:
+                return txt.decode('utf-8', errors='ignore')
+            except Exception:
+                return txt.decode('latin-1', errors='ignore') if isinstance(txt, (bytes, bytearray)) else str(txt)
+        return str(txt)
 
     def _extract_ttl(self, output: str) -> Optional[int]:
         match = re.search(r"ttl=(\d+)", output, re.IGNORECASE)
@@ -639,11 +819,13 @@ class LatencyTracer:
 
     def _parse_ping_output(self, output: str) -> Dict[str, float]:
         stats = {'loss_pct': 100.0}
-        
-        # Extract packet loss
-        loss_match = re.search(r"(\d+)% packet loss", output)
+
+        # Extract packet loss; handle different formats/locales
+        loss_match = re.search(r"(\d+(?:[.,]\d+)?)% packet loss", output, re.IGNORECASE)
+        if not loss_match:
+            loss_match = re.search(r"Lost = \d+ \((\d+)%\s*loss\)", output, re.IGNORECASE)
         if loss_match:
-            stats['loss_pct'] = float(loss_match.group(1))
+            stats['loss_pct'] = float(loss_match.group(1).replace(',', '.'))
 
         if self.system == "windows":
             p = r"Minimum = (\d+)ms, Maximum = (\d+)ms, Average = (\d+)ms"
@@ -656,14 +838,14 @@ class LatencyTracer:
                     'mdev': 0.0
                 })
         else:
-            p = r"(\d+\.\d+)/(\d+\.\d+)/(\d+\.\d+)/(\d+\.\d+) ms"
+            p = r"([0-9]+(?:[.,][0-9]+)?)/([0-9]+(?:[.,][0-9]+)?)/([0-9]+(?:[.,][0-9]+)?)/([0-9]+(?:[.,][0-9]+)?) ms"
             match = re.search(p, output)
             if match:
                 stats.update({
-                    'min': float(match.group(1)),
-                    'avg': float(match.group(2)),
-                    'max': float(match.group(3)),
-                    'mdev': float(match.group(4))
+                    'min': float(match.group(1).replace(',', '.')),
+                    'avg': float(match.group(2).replace(',', '.')),
+                    'max': float(match.group(3).replace(',', '.')),
+                    'mdev': float(match.group(4).replace(',', '.'))
                 })
         return stats
 
@@ -773,6 +955,10 @@ class LatencyTracer:
             w_lat += vp['lat'] * w
             w_lon += vp['lon'] * w
 
+        # If no weight accumulated, avoid division by zero and return neutral values.
+        if total_w == 0:
+            return 0.0, 0.0, 0.0
+
         base_conf = min(0.9, len(vantage_points) / 5.0)
         jitter_penalty = min(0.4, avg_mdev / 100.0)
         confidence = round(base_conf - jitter_penalty, 2)
@@ -782,14 +968,22 @@ class LatencyTracer:
     async def run_triangulation(self, target_ip: str,
                                 vp_data: List[Dict[str, Any]]) \
             -> Dict[str, Any]:
-        results = await asyncio.gather(
-            *[self.ping(target_ip) for _ in vp_data],
-            return_exceptions=True
-        )
+        # Allow vp_data to optionally include precomputed measurement results
+        tasks = []
+        for vp in vp_data:
+            if 'precomputed' in vp and isinstance(vp['precomputed'], dict):
+                # immediate successful placeholder
+                tasks.append(asyncio.create_task(asyncio.sleep(0, result=vp['precomputed'])))
+            else:
+                tasks.append(asyncio.create_task(self.ping(target_ip)))
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
         tri_data, final = [], {}
         for vp_info, res in zip(vp_data, results):
-            reachable = (not isinstance(res, Exception) and
-                         res.get('status') == 'reachable')
+            if isinstance(res, Exception):
+                logger.warning("ping for vp %s failed: %s", vp_info.get('id'), res)
+                continue
+            reachable = res.get('status') == 'reachable'
             if reachable:
                 tri_data.append({
                     'lat': vp_info['lat'], 'lon': vp_info['lon'],
@@ -797,6 +991,8 @@ class LatencyTracer:
                     'mdev': res['rtt_ms'].get('mdev', 0),
                     'avg_rtt': res['rtt_ms'].get('avg', 0)
                 })
+                final[vp_info['id']] = res
+            else:
                 final[vp_info['id']] = res
 
         final['clock_skew_hz'] = await self.measure_clock_skew(target_ip)
