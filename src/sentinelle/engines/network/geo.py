@@ -3,86 +3,32 @@ import httpx
 import json
 import logging
 import asyncio
-from typing import Dict, Any, Optional
-
-logger = logging.getLogger(__name__)
-
+from typing import Dict, Any, Optional, List
+from abc import ABC, abstractmethod
 
 from ...core.engine import BaseEngine, EventType
 
-__version__ = "1.0.0"
+logger = logging.getLogger(__name__)
 
-class IPEngine(BaseEngine):
-    """
-    Unified Engine for IP Intelligence gathering.
-    """
-    BASE_URL = "https://get.geojs.io/v1/ip/geo/{ip}.json"
-    PTR_URL = "https://get.geojs.io/v1/dns/ptr/{ip}.json"
-    IP_URL = "https://get.geojs.io/v1/ip.json"
+__version__ = "2.0.0"
 
-    def __init__(self, client: Optional[httpx.AsyncClient] = None):
-        super().__init__()
-        self.client = client
+class GeolocationProvider(ABC):
+    """Abstract base class for geolocation data providers."""
+    @abstractmethod
+    async def get_data(self, ip: str, client: httpx.AsyncClient) -> Optional[Dict[str, Any]]:
+        pass
 
-    async def _get_client(self) -> httpx.AsyncClient:
-        if self.client is None or self.client.is_closed:
-            self.client = httpx.AsyncClient(timeout=10, follow_redirects=True)
-        return self.client
+class IPAPIProvider(GeolocationProvider):
+    """Provider for ip-api.com."""
+    URL = "http://ip-api.com/json/{ip}?fields=status,message,country,countryCode,regionName,city,lat,lon,timezone,isp,as,query"
 
-    async def get_my_ip(self) -> Optional[str]:
-        """Get public IP of the caller."""
+    async def get_data(self, ip: str, client: httpx.AsyncClient) -> Optional[Dict[str, Any]]:
         try:
-            client = await self._get_client()
-            response = await client.get(self.IP_URL)
-            if response.status_code == 200:
-                return response.json().get('ip')
-            return None
-        except Exception as e:
-            logger.warning("Failed to get public IP: %s", e)
-            return None
-
-    async def get_geo_data(self, ip_address: str) -> Optional[Dict[str, Any]]:
-        """Get all available geodata for a specific IP address from GeoJS."""
-        try:
-            client = await self._get_client()
-            url = self.BASE_URL.format(ip=ip_address)
-            response = await client.get(url)
-            if response.status_code == 200:
-                return response.json()
-            return None
-        except Exception as e:
-            logger.warning("GeoJS geo lookup failed for %s: %s", ip_address, e)
-            return None
-
-    async def get_ptr_data(self, ip_address: str) -> Optional[str]:
-        """Get the DNS PTR record of an IP address via GeoJS."""
-        try:
-            client = await self._get_client()
-            url = self.PTR_URL.format(ip=ip_address)
-            response = await client.get(url)
-            if response.status_code == 200:
-                data = response.json()
-                return data.get('ptr')
-            return None
-        except Exception as e:
-            logger.debug("GeoJS PTR lookup failed for %s: %s", ip_address, e)
-            return None
-
-    async def run(self, ip_address: str, **kwargs) -> Optional[Dict[str, Any]]:
-        self.log(f"🔍 Analyzing IP: {ip_address}...")
-        self.progress(advance=0, total=4, description="Initializing")
-        
-        geo_data = {}
-        client = await self._get_client()
-        
-        # 1. Try ip-api.com - Primary
-        self.progress(advance=1, description="Querying primary database")
-        try:
-            response = await client.get(f"https://demo.ip-api.com/json/{ip_address}?fields=66846719", timeout=5)
+            response = await client.get(self.URL.format(ip=ip), timeout=5)
             if response.status_code == 200:
                 data = response.json()
                 if data.get('status') == 'success':
-                    geo_data.update({
+                    return {
                         'country': data.get('country'),
                         'country_code': data.get('countryCode'),
                         'region': data.get('regionName'),
@@ -92,152 +38,207 @@ class IPEngine(BaseEngine):
                         'timezone': data.get('timezone'),
                         'isp': data.get('isp'),
                         'asn': data.get('as'),
-                    })
-                    # Emit individual attributes as data events for real-time table updates
-                    for k, v in geo_data.items():
-                        if v: self.emit(EventType.DATA, data={"Category": "Basic", "Property": k.capitalize(), "Value": str(v)})
+                    }
+            return None
         except Exception as e:
-            self.log(f"⚠️ Primary lookup failed: {e}")
+            logger.debug(f"ip-api.com lookup failed for {ip}: {e}")
+            return None
 
-        # 2. Try GeoJS for fallback
-        self.progress(advance=1, description="Querying fallback database")
+class GeoJSProvider(GeolocationProvider):
+    """Provider for get.geojs.io."""
+    URL = "https://get.geojs.io/v1/ip/geo/{ip}.json"
+
+    async def get_data(self, ip: str, client: httpx.AsyncClient) -> Optional[Dict[str, Any]]:
         try:
-            url = self.BASE_URL.format(ip=ip_address)
-            response = await client.get(url)
+            response = await client.get(self.URL.format(ip=ip), timeout=5)
             if response.status_code == 200:
-                raw_data = response.json()
-                mapping = {
-                    'country': 'country',
-                    'country_code': 'country_code',
-                    'region': 'region',
-                    'city': 'city',
-                    'latitude': 'latitude',
-                    'longitude': 'longitude',
-                    'timezone': 'timezone',
-                    'isp': 'organization_name',
-                    'asn': 'asn',
-                    'organization': 'organization'
+                data = response.json()
+                return {
+                    'country': data.get('country'),
+                    'country_code': data.get('country_code'),
+                    'region': data.get('region'),
+                    'city': data.get('city'),
+                    'latitude': data.get('latitude'),
+                    'longitude': data.get('longitude'),
+                    'timezone': data.get('timezone'),
+                    'isp': data.get('organization_name'),
+                    'asn': data.get('asn'),
                 }
-                for k, v in mapping.items():
-                    if not geo_data.get(k) and raw_data.get(v):
-                        val = raw_data.get(v)
-                        geo_data[k] = val
-                        self.emit(EventType.DATA, data={"Category": "Geo", "Property": k.capitalize(), "Value": str(val)})
+            return None
         except Exception as e:
-            self.log(f"⚠️ Fallback lookup failed: {e}")
+            logger.debug(f"GeoJS lookup failed for {ip}: {e}")
+            return None
 
-        # 3. DNS PTR
-        self.progress(advance=1, description="Checking DNS records")
+class IPEngine(BaseEngine):
+    """
+    Advanced Engine for IP Intelligence gathering following SOLID principles.
+    """
+    
+    def __init__(self, client: Optional[httpx.AsyncClient] = None):
+        super().__init__()
+        self._client = client
+        self._loop = None
+        self.providers: List[GeolocationProvider] = [
+            IPAPIProvider(),
+            GeoJSProvider()
+        ]
+
+    async def _get_client(self) -> httpx.AsyncClient:
         try:
-            url = self.PTR_URL.format(ip=ip_address)
-            response = await client.get(url)
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            current_loop = None
+
+        if self._client is None or self._client.is_closed or self._loop != current_loop:
+            # Note: We don't close the old client here to avoid issues with other tasks
+            # but in this CLI context it's generally fine.
+            self._client = httpx.AsyncClient(timeout=10, follow_redirects=True)
+            self._loop = current_loop
+        return self._client
+
+    async def get_my_ip(self) -> Optional[str]:
+        """Get public IP of the caller."""
+        try:
+            client = await self._get_client()
+            response = await client.get("https://get.geojs.io/v1/ip.json")
             if response.status_code == 200:
-                ptr = response.json().get('ptr')
-                if ptr:
-                    geo_data['ptr'] = ptr
+                return response.json().get('ip')
+            return None
+        except Exception as e:
+            logger.warning("Failed to get public IP: %s", e)
+            return None
+
+    async def run(self, ip_address: str, **kwargs) -> Optional[Dict[str, Any]]:
+        self.log(f"🔍 Starting Intelligence gathering for IP: {ip_address}")
+        self.progress(advance=0, total=len(self.providers) + 1, description="Initializing")
+        
+        final_data = {}
+        client = await self._get_client()
+        
+        for provider in self.providers:
+            provider_name = provider.__class__.__name__
+            self.progress(advance=1, description=f"Querying {provider_name}")
+            
+            data = await provider.get_data(ip_address, client)
+            if data:
+                # Fill missing data
+                for key, value in data.items():
+                    if value and not final_data.get(key):
+                        final_data[key] = value
+                        self.emit(EventType.DATA, data={"Category": "Intelligence", "Property": key.replace('_', ' ').capitalize(), "Value": str(value)})
+                
+                # If we have all critical data, we can stop early
+                if all(final_data.get(k) for k in ['latitude', 'longitude', 'isp']):
+                    break
+
+        # DNS PTR record as additional info
+        self.progress(advance=1, description="Fetching PTR record")
+        try:
+            ptr_resp = await client.get(f"https://get.geojs.io/v1/dns/ptr/{ip_address}.json")
+            if ptr_resp.status_code == 200:
+                ptr = ptr_resp.json().get('ptr')
+                if ptr and "Failed" not in str(ptr):
+                    final_data['ptr'] = ptr
                     self.emit(EventType.DATA, data={"Category": "Network", "Property": "PTR", "Value": ptr})
-        except: pass
+        except:
+            pass
 
         self.progress(advance=1, description="Analysis complete")
-        self.emit(EventType.COMPLETE, data=geo_data)
-        return geo_data
+        self.emit(EventType.COMPLETE, data=final_data)
+        return final_data
 
-class GeoJSCollector(IPEngine):
-    """Legacy compatibility class."""
-    async def collect_enriched(self, ip_address: str) -> Optional[Dict[str, Any]]:
-        return await self.run(ip_address)
-
-
-# Standalone functions for backward compatibility or direct use (now async)
-
-_collector = GeoJSCollector()
-
+# Backward compatibility layer
+_engine = IPEngine()
 
 async def getIP() -> Optional[str]:
-    """Get the current public IP address (Async)."""
-    return await _collector.get_my_ip()
-
+    return await _engine.get_my_ip()
 
 async def getGeoData(ip: str) -> Optional[Dict[str, Any]]:
-    """Get geodata for a specific IP (Async)."""
-    return await _collector.get_geo_data(ip)
-
+    return await _engine.run(ip)
 
 async def getCountry(ip: str, output_format: str = 'plain') -> Any:
-    """Get country information for an IP (Async)."""
-    data = await _collector.get_geo_data(ip) or {}
+    data = await _engine.run(ip) or {}
     country = data.get('country', 'Unknown')
-    code = data.get('country_code', '??')
-
     if output_format == 'json':
-        return json.dumps({'country': country, 'country_code': code})
+        return json.dumps({'country': country, 'country_code': data.get('country_code')})
     return country
 
-
 async def getPTR(ip: str) -> Optional[str]:
-    """Get PTR record for an IP (Async)."""
-    return await _collector.get_ptr_data(ip)
-
+    data = await _engine.run(ip)
+    return data.get('ptr')
 
 def _sync_run(coro):
-    """Helper to run a coroutine synchronously from a non-async context."""
     try:
-        return asyncio.run(coro)
+        loop = asyncio.get_event_loop()
     except RuntimeError:
-        # Loop already running, try to use a new loop in a thread or fail
-        new_loop = asyncio.new_event_loop()
-        try:
-            return new_loop.run_until_complete(coro)
-        finally:
-            new_loop.close()
-
-
-def showIpDetails(ip: str, verbosity: str = 'brief', include_latency: bool = False, collector=None):
-    """Synchronous wrapper for printing summary."""
-    if collector is None:
-        collector = _collector
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
     
-    geo = _sync_run(collector.collect_enriched(ip))
-        
-    if not geo:
-        print(f"No intelligence gathered for IP: {ip}")
+    if loop.is_running():
+        import threading
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            return executor.submit(lambda: asyncio.run(coro)).result()
+    else:
+        return loop.run_until_complete(coro)
+
+def showIpDetails(ip: str):
+    """
+    Professional display of IP intelligence details.
+    """
+    data = _sync_run(_engine.run(ip))
+    if not data:
+        print(f"[-] No data found for {ip}")
         return
 
     try:
         from rich.console import Console
         from rich.table import Table
+        from rich.panel import Panel
         console = Console()
 
-        table = Table(show_header=False, show_lines=False)
-        table.add_column('Field', width=24)
-        table.add_column('Value')
+        table = Table(show_header=False, box=None, padding=(0, 2))
+        table.add_column("Property", style="bold cyan", width=20)
+        table.add_column("Value", style="white")
 
-        table.add_row('IP', ip)
-        if geo.get('country'):
-            table.add_row('Country', f"[cyan]{geo['country']}[/]")
-        if geo.get('region'):
-            table.add_row('Region', geo['region'])
-        if geo.get('city'):
-            table.add_row('City', geo['city'])
-        if geo.get('isp'):
-            table.add_row('ISP', f"[yellow]{geo['isp']}[/]")
-        if geo.get('asn'):
-            table.add_row('ASN', str(geo['asn']))
-        if geo.get('ptr'):
-            table.add_row('PTR', geo['ptr'])
-        if geo.get('latitude') and geo.get('longitude'):
-            table.add_row('Coordinates', f"{geo['latitude']}, {geo['longitude']}")
+        # Required fields display
+        display_map = [
+            ('Country', 'country'),
+            ('Country Code', 'country_code'),
+            ('Region', 'region'),
+            ('City', 'city'),
+            ('Latitude', 'latitude'),
+            ('Longitude', 'longitude'),
+            ('Timezone', 'timezone'),
+            ('ISP/Operator', 'isp'),
+            ('ASN', 'asn'),
+            ('PTR Record', 'ptr')
+        ]
 
-        console.rule("IP INTELLIGENCE SUMMARY")
-        console.print(table)
-    except Exception:
-        print(f"IP: {ip}")
-        print(f"Country: {geo.get('country')}")
-        print(f"ISP: {geo.get('isp')}")
+        found_any = False
+        for label, key in display_map:
+            val = data.get(key)
+            if val:
+                table.add_row(f"{label}:", str(val))
+                found_any = True
+
+        if not found_any:
+            table.add_row("Status:", "No specific intelligence found.")
+
+        console.print(Panel(table, title=f"[bold green]IP Intelligence: {ip}[/]", expand=False))
+        
+        if data.get('latitude') and data.get('longitude'):
+            console.print(f"\n[bold yellow]📍 Real-time GPS Coordinates:[/] {data['latitude']}, {data['longitude']}")
+            console.print(f"[dim italic]Google Maps: https://www.google.com/maps?q={data['latitude']},{data['longitude']}[/]")
+
+    except ImportError:
+        print(f"\n{'='*20} IP INTELLIGENCE: {ip} {'='*20}")
+        for key, val in data.items():
+            print(f"{key.replace('_', ' ').capitalize():<20}: {val}")
 
 def showCountryDetails(ip: str):
-    """Print detailed Country information."""
-    data = _sync_run(_collector.get_geo_data(ip))
+    data = _sync_run(_engine.run(ip))
     if data:
-        print(f"Country: {data.get('country')}")
-        print(f"Code: {data.get('country_code')}")
+        print(f"Country: {data.get('country')} ({data.get('country_code')})")
+        print(f"Region: {data.get('region')}")
+        print(f"City: {data.get('city')}")
