@@ -73,7 +73,7 @@ impl RawLatencyProbe {
         Ok(1500)
     }
 
-    /// Exemple d'enrichissement d'un LatencyIntel existant avec le MTU brut.
+    /// Enrichit un LatencyIntel existant avec le MTU détecté via ICMP.
     pub fn enrich_latency(&self, base: &mut LatencyIntel) -> Result<(), RawLatencyError> {
         let mtu = self.discover_path_mtu(base.target)?;
         base.extra.insert("path_mtu".to_string(), mtu.to_string());
