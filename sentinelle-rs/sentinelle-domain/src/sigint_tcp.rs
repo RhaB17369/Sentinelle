@@ -1,7 +1,8 @@
 #![deny(warnings)]
 
 use std::net::IpAddr;
-use std::collections::HashMap;
+
+use crate::ClockSkew;
 
 #[derive(Debug, Clone)]
 pub struct TcpFingerprint {
@@ -20,6 +21,7 @@ pub struct TcpSigintResult {
     pub target: IpAddr,
     pub port: u16,
     pub fingerprint: Option<TcpFingerprint>,
+    pub clock_skew: Option<ClockSkew>,
 }
 
 #[derive(Debug, thiserror::Error)]

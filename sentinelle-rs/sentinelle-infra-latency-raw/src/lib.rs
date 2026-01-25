@@ -133,9 +133,9 @@ impl TcpSigintEngine {
         let timeout = Duration::from_secs(3);
         let mut buf = [0u8; 4096];
 
-        while start.elapsed() < timeout {
+        while start.elapsed() &lt; timeout {
             match rx.recv_from(&mut buf) {
-                Ok((size, addr)) => {
+                Ok((size, addr)) =&gt; {
                     if addr != std::net::IpAddr::V4(ip) {
                         continue;
                     }
@@ -147,22 +147,98 @@ impl TcpSigintEngine {
                             if tcp.get_destination() != 40000 {
                                 continue;
                             }
-                            if tcp.get_flags() & TcpFlags::SYN == TcpFlags::SYN
-                                && tcp.get_flags() & TcpFlags::ACK == TcpFlags::ACK
+                            if tcp.get_flags() &amp; TcpFlags::SYN == TcpFlags::SYN
+                                &amp;&amp; tcp.get_flags() &amp; TcpFlags::ACK == TcpFlags::ACK
                             {
                                 let win = tcp.get_window();
                                 let ttl = Some(ipv4.get_ttl());
                                 let ip_id = Some(ipv4.get_identification());
-                                // Options parsing minimal: on ne fait que noter leur présence
-                                let options = vec!["raw".to_string()];
+
+                                // Parsing des options TCP brutes
+                                let mut options = Vec::new();
+                                let mut wscale = None;
+                                let mut sack_permitted = false;
+                                let mut ts_val = None;
+                                let mut ts_ecr = None;
+
+                                if let Some(raw_opts) = tcp.get_options_raw() {
+                                    let mut i = 0;
+                                    while i &lt; raw_opts.len() {
+                                        let kind = raw_opts[i];
+                                        match kind {
+                                            0 =&gt; {
+                                                options.push("EOL".to_string());
+                                                break;
+                                            }
+                                            1 =&gt; {
+                                                options.push("NOP".to_string());
+                                                i += 1;
+                                            }
+                                            2 =&gt; {
+                                                if i + 4 &lt;= raw_opts.len() {
+                                                    options.push("MSS".to_string());
+                                                    i += 4;
+                                                } else {
+                                                    break;
+                                                }
+                                            }
+                                            3 =&gt; {
+                                                if i + 3 &lt;= raw_opts.len() {
+                                                    wscale = Some(raw_opts[i + 2]);
+                                                    options.push("WS".to_string());
+                                                    i += 3;
+                                                } else {
+                                                    break;
+                                                }
+                                            }
+                                            4 =&gt; {
+                                                options.push("SACK".to_string());
+                                                sack_permitted = true;
+                                                i += 2;
+                                            }
+                                            8 =&gt; {
+                                                if i + 10 &lt;= raw_opts.len() {
+                                                    let ts_bytes = &raw_opts[i + 2..i + 10];
+                                                    let ts_val_u32 = u32::from_be_bytes([
+                                                        ts_bytes[0], ts_bytes[1],
+                                                        ts_bytes[2], ts_bytes[3],
+                                                    ]);
+                                                    let ts_ecr_u32 = u32::from_be_bytes([
+                                                        ts_bytes[4], ts_bytes[5],
+                                                        ts_bytes[6], ts_bytes[7],
+                                                    ]);
+                                                    ts_val = Some(ts_val_u32);
+                                                    ts_ecr = Some(ts_ecr_u32);
+                                                    options.push("TS".to_string());
+                                                    i += 10;
+                                                } else {
+                                                    break;
+                                                }
+                                            }
+                                            _ =&gt; {
+                                                // Option inconnue : lire longueur et sauter
+                                                if i + 2 &lt;= raw_opts.len() {
+                                                    let len = raw_opts[i + 1] as usize;
+                                                    if len &lt; 2 || i + len &gt; raw_opts.len() {
+                                                        break;
+                                                    }
+                                                    options.push(format!("OPT{}", kind));
+                                                    i += len;
+                                                } else {
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
 
                                 return Some(TcpFingerprint {
                                     window_size: win,
                                     options,
-                                    wscale: None,
-                                    sack_permitted: false,
-                                    ts_val: None,
-                                    ts_ecr: None,
+                                    wscale,
+                                    sack_permitted,
+                                    ts_val,
+                                    ts_ecr,
                                     ttl,
                                     ip_id,
                                 });
@@ -170,13 +246,12 @@ impl TcpSigintEngine {
                         }
                     }
                 }
-                Err(_) => continue,
+                Err(_) =&gt; continue,
             }
         }
 
         None
     }
-}
 
 impl SigintTcpPort for TcpSigintEngine {
     fn probe(&self, target: IpAddr, port: u16) -> Result<TcpSigintResult, TcpSigintError> {
@@ -184,12 +259,50 @@ impl SigintTcpPort for TcpSigintEngine {
             return Err(TcpSigintError::InvalidTarget(target.to_string()));
         }
         let (mut tx, rx) = self.open_tcp_channel()?;
-        self.send_syn(&mut tx, target, port)?;
-        let fp = self.recv_synack(rx, target, port);
+
+        // Collecte de plusieurs réponses pour estimer le clock skew via timestamps TCP
+        let mut samples: Vec<(f64, u32)> = Vec::new();
+        let mut last_fp: Option<TcpFingerprint> = None;
+
+        for _ in 0..4 {
+            let t0 = Instant::now();
+            self.send_syn(&mut tx, target, port)?;
+            if let Some(fp) = self.recv_synack(rx.try_clone().unwrap(), target, port) {
+                let t = t0.elapsed().as_secs_f64();
+                if let Some(ts) = fp.ts_val {
+                    samples.push((t, ts));
+                }
+                last_fp = Some(fp);
+            }
+        }
+
+        let clock_skew = if samples.len() &gt;= 2 {
+            // Régression linéaire simple: ts = a * t + b => a ~ skew
+            let n = samples.len() as f64;
+            let sum_t: f64 = samples.iter().map(|(t, _)| *t).sum();
+            let sum_ts: f64 = samples.iter().map(|(_, ts)| *ts as f64).sum();
+            let sum_tts: f64 = samples.iter().map(|(t, ts)| *t * (*ts as f64)).sum();
+            let sum_tt: f64 = samples.iter().map(|(t, _)| t * t).sum();
+
+            let denom = n * sum_tt - sum_t * sum_t;
+            if denom.abs() &gt; f64::EPSILON {
+                let a = (n * sum_tts - sum_t * sum_ts) / denom;
+                Some(ClockSkew {
+                    hz: a,
+                    sample_count: samples.len(),
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         Ok(TcpSigintResult {
             target,
             port,
-            fingerprint: fp,
+            fingerprint: last_fp,
+            clock_skew,
         })
     }
 }
@@ -322,6 +435,35 @@ impl TracerouteSigintEngine {
     }
 }
 
+impl TracerouteSigintEngine {
+    fn lookup_asn(&self, ip: &str) -> Option<(String, String)> {
+        // Team Cymru DNS: &lt;revip&gt;.origin.asn.cymru.com TXT
+        let rev: String = ip.split('.').rev().collect::<Vec&lt;_&gt;>().join(".");
+        let name = format!("{rev}.origin.asn.cymru.com");
+
+        let mut rt = tokio::runtime::Runtime::new().ok()?;
+        let mut opts = ResolverOpts::default();
+        opts.timeout = Duration::from_secs(2);
+        let resolver = TokioAsyncResolver::tokio(ResolverConfig::default(), opts).ok()?;
+
+        let txt = rt.block_on(resolver.txt_lookup(name)).ok()?;
+        let first = txt.iter().next()?;
+        let txt_data: String = first
+            .txt_data()
+            .iter()
+            .map(|b| String::from_utf8_lossy(b).to_string())
+            .collect();
+        // Format: "ASN | IP | CC | Registry | Allocated | AS Name"
+        let parts: Vec&lt;_&gt; = txt_data.split('|').map(|s| s.trim()).collect();
+        if parts.len() &gt;= 3 {
+            let asn = parts[0].to_string();
+            let country = parts[2].to_string();
+            return Some((asn, country));
+        }
+        None
+    }
+}
+
 impl SigintTraceroutePort for TracerouteSigintEngine {
     fn trace(&self, target: IpAddr, max_hops: u8) -> Result<NetworkPathIntel, TracerouteSigintError> {
         if target.is_unspecified() {
@@ -343,11 +485,13 @@ impl SigintTraceroutePort for TracerouteSigintEngine {
             .map_err(|_| TracerouteSigintError::ProbeFailure)?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let re_ip = Regex::new(r"(\d{1,3}(?:\.\d{1,3}){3})").unwrap();
-        let re_rtt = Regex::new(r"(\d+(?:\.\d+)?) ms").unwrap();
+        let re_ip = Regex::new(r"(\\d{1,3}(?:\\.\\d{1,3}){3})").unwrap();
+        let re_rtt = Regex::new(r"(\\d+(?:\\.\\d+)?) ms").unwrap();
 
         let mut hops = Vec::new();
         let mut hop_index: u8 = 1;
+        let mut as_path = Vec::new();
+
         for line in stdout.lines() {
             let ips: Vec<_> = re_ip.captures_iter(line).collect();
             if ips.is_empty() {
@@ -358,23 +502,38 @@ impl SigintTraceroutePort for TracerouteSigintEngine {
                 .captures(line)
                 .and_then(|c| c[1].parse::<f64>().ok());
 
+            let (asn, country) = match self.lookup_asn(&ip) {
+                Some((a, c)) => {
+                    as_path.push(a.clone());
+                    (Some(a), Some(c))
+                }
+                None => (None, None),
+            };
+
             hops.push(TracerouteHopDetail {
                 hop_index,
                 ip,
                 rtt_ms,
-                asn: None,
+                asn,
                 owner: None,
-                country: None,
+                country,
             });
             hop_index = hop_index.saturating_add(1);
+        }
+
+        // Déduplication simple de l'AS path (consécutifs identiques)
+        let mut dedup_as_path = Vec::new();
+        for a in as_path {
+            if dedup_as_path.last() != Some(&a) {
+                dedup_as_path.push(a);
+            }
         }
 
         Ok(NetworkPathIntel {
             target,
             hops,
-            as_path: Vec::new(),
-            ixps: Vec::new(),
+            as_path: dedup_as_path,
+            ixps: Vec::new(), // IXP à remplir via patterns spécifiques si nécessaire
         })
     }
-}
 }
