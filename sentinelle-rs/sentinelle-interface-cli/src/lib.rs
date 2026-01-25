@@ -775,6 +775,13 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, io::Error> {
                 };
                 app.output_scroll = 0;
             }
+            KeyCode::Char('t') => {
+                // Toggle vue traceroute détaillée si des hops sont disponibles
+                if !app.traceroute_hops.is_empty() {
+                    app.show_traceroute_detail = !app.show_traceroute_detail;
+                    app.output_scroll = 0;
+                }
+            }
             KeyCode::Enter => {
                 app.input.clear();
                 app.log.clear();
