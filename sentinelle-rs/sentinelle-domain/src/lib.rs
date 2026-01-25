@@ -7,6 +7,7 @@ pub mod ip;
 pub mod social;
 pub mod metrics;
 pub mod monitoring;
+pub mod email_recon;
 
 pub use shared::{Email, EmailError};
 pub use intel::{
@@ -21,3 +22,4 @@ pub use social::{
 };
 pub use metrics::MetricsPort;
 pub use monitoring::{Target, TargetType, TargetState, MonitoringEvent, detect_change};
+pub use email_recon::{EmailReconPort, EmailReconResult, DnsProviderHint};
