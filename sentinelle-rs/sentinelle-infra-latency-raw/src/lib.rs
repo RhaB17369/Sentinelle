@@ -277,7 +277,7 @@ impl SigintTcpPort for TcpSigintEngine {
             }
         }
 
-        let clock_skew = if samples.len() &gt;= 2 {
+        let clock_skew = if samples.len() >= 2 {
             // Régression linéaire simple: ts = a * t + b => a ~ skew
             let n = samples.len() as f64;
             let sum_t: f64 = samples.iter().map(|(t, _)| *t).sum();
@@ -286,7 +286,7 @@ impl SigintTcpPort for TcpSigintEngine {
             let sum_tt: f64 = samples.iter().map(|(t, _)| t * t).sum();
 
             let denom = n * sum_tt - sum_t * sum_t;
-            if denom.abs() &gt; f64::EPSILON {
+            if denom.abs() > f64::EPSILON {
                 let a = (n * sum_tts - sum_t * sum_ts) / denom;
                 Some(ClockSkew {
                     hz: a,
@@ -456,8 +456,8 @@ impl TracerouteSigintEngine {
 
 impl TracerouteSigintEngine {
     fn lookup_asn(&self, ip: &str) -> Option<(String, String)> {
-        // Team Cymru DNS: &lt;revip&gt;.origin.asn.cymru.com TXT
-        let rev: String = ip.split('.').rev().collect::<Vec&lt;_&gt;>().join(".");
+        // Team Cymru DNS: <revip>.origin.asn.cymru.com TXT
+        let rev: String = ip.split('.').rev().collect::<Vec<_>>().join(".");
         let name = format!("{rev}.origin.asn.cymru.com");
 
         let mut rt = tokio::runtime::Runtime::new().ok()?;
@@ -473,11 +473,11 @@ impl TracerouteSigintEngine {
             .map(|b| String::from_utf8_lossy(b).to_string())
             .collect();
         // Format: "ASN | IP | CC | Registry | Allocated | AS Name"
-        let parts: Vec&lt;_&gt; = txt_data.split('|').map(|s| s.trim()).collect();
-        if parts.len() &gt;= 3 {
+        let parts: Vec<_> = txt_data.split('|').map(|s| s.trim()).collect();
+        if parts.len() >= 3 {
             let asn = parts[0].to_string();
             let country = parts[2].to_string();
-            let owner = if parts.len() &gt;= 6 { Some(parts[5].to_string()) } else { None };
+            let owner = if parts.len() >= 6 { Some(parts[5].to_string()) } else { None };
             return Some((asn, country, owner));
         }
         None
