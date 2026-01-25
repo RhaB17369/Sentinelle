@@ -8,3 +8,5 @@ sentinelle-domain = { path = "../sentinelle-domain" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "process"] }
 thiserror = "1"
 pnet = "0.35"
+regex = "1"
+trust-dns-resolver = "0.23"
