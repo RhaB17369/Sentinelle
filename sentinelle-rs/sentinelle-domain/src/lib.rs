@@ -11,6 +11,9 @@ pub mod email_recon;
 pub mod domain_intel;
 pub mod latency_intel;
 pub mod phone_intel;
+pub mod sigint_tcp;
+pub mod sigint_icmp;
+pub mod sigint_traceroute;
 
 pub use shared::{Email, EmailError};
 pub use intel::{
@@ -36,4 +39,9 @@ pub use latency_intel::{
 };
 pub use phone_intel::{
     PhoneNumber, PhoneError, PhoneIntel, PhoneIntelError, PhoneIntelligencePort, GpsLocation,
+};
+pub use sigint_tcp::{SigintTcpPort, TcpSigintResult, TcpSigintError, TcpFingerprint};
+pub use sigint_icmp::{SigintIcmpPort, IcmpSigintResult, IcmpSigintError, IpIdSeries, ClockSkew};
+pub use sigint_traceroute::{
+    SigintTraceroutePort, NetworkPathIntel, TracerouteSigintError, TracerouteHopDetail,
 };
