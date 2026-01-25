@@ -23,7 +23,7 @@ use sentinelle_application::usecases::{
     RunDomainIntel,
     RunEmailRecon,
 };
-use sentinelle_domain::{Email, SocialTarget};
+use sentinelle_domain::{Email, SocialTarget, TracerouteHopDetail};
 use sentinelle_infra_latency_raw::{TcpSigintEngine, IcmpSigintEngine, TracerouteSigintEngine};
 use sentinelle_infra_metrics::InMemoryMetrics;
 use sentinelle_infra_osint_ip::CompositeIpIntelligence;
@@ -105,6 +105,8 @@ struct App {
     activity_filter_mode: ActivityFilterMode,
     active_section: Option&lt;String&gt;,
     report_mode: ReportMode,
+    traceroute_hops: Vec&lt;TracerouteHopDetail&gt;,
+    show_traceroute_detail: bool,
 }
 
 impl App {
@@ -129,6 +131,8 @@ impl App {
             activity_filter_mode: ActivityFilterMode::Both,
             active_section: None,
             report_mode: ReportMode::Full,
+            traceroute_hops: Vec::new(),
+            show_traceroute_detail: false,
         }
     }
 
@@ -140,8 +144,15 @@ impl App {
     }
 
     fn cache_load(&mut self, key: &str) -> bool {
-        if let Ok(Some(cached)) = self.cache.get_json::<CachedLog>(key) {
+        if let Ok(Some(cached)) = self.cache.get_json::&lt;CachedLog&gt;(key) {
             self.log = cached.lines;
+            // Les rapports structurés et hops ne sont pas reconstruits depuis le cache,
+            // on désactive donc les vues avancées.
+            self.report = ReportKind::None;
+            self.traceroute_hops.clear();
+            self.show_traceroute_detail = false;
+            self.active_section = None;
+            self.report_mode = ReportMode::Full;
             true
         } else {
             false
@@ -307,78 +318,145 @@ fn ui<B: ratatui::backend::Backend>(f: &mut ratatui::Frame<B>, app: &App) {
 
     // Output pane: table pour rapports structurés, sinon lignes texte avec scroll
     match &app.report {
-        ReportKind::Ip(report) | ReportKind::Email(ReportIp { headers: report_headers, rows: report_rows }) => {
-            // Ce bras ne sera pas utilisé correctement pour Email, on gère Email séparément ci-dessous.
-            let _ = (report_headers, report_rows); // évite warning
-        }
-        _ => {}
-    }
-
-    match &app.report {
         ReportKind::Ip(report) => {
-            let visible_rows = (right_chunks[1].height as usize).saturating_sub(3);
+            if app.show_traceroute_detail && !app.traceroute_hops.is_empty() {
+                // Vue détaillée par hop
+                let visible_rows = (right_chunks[1].height as usize).saturating_sub(3);
+                let total_rows = app.traceroute_hops.len();
+                let max_scroll = total_rows.saturating_sub(visible_rows);
+                let scroll = app.output_scroll.min(max_scroll);
+                let start = total_rows.saturating_sub(visible_rows + scroll);
+                let end = total_rows.saturating_sub(scroll);
 
-            // Appliquer éventuel zoom de section et mode résumé
-            let filtered_rows: Vec<&Vec<String>> = report
-                .rows
-                .iter()
-                .filter(|row| {
-                    let section = row.get(0).map(|s| s.as_str()).unwrap_or("");
-                    let section_ok = match &app.active_section {
-                        None => true,
-                        Some(active) => section == active,
-                    };
-                    let summary_ok = match app.report_mode {
-                        ReportMode::Full => true,
-                        ReportMode::Summary => match section {
-                            "IP" => matches!(row.get(1).map(String::as_str), Some("Adresse") | Some("Pays") | Some("ISP")),
-                            "Domain" => matches!(row.get(1).map(String::as_str), Some("Host") | Some("Registrar")),
-                            "SIGINT TCP" => matches!(row.get(1).map(String::as_str), Some("OS")),
-                            "Traceroute" => matches!(row.get(1).map(String::as_str), Some("Hops")),
-                            _ => false,
-                        },
-                    };
-                    section_ok && summary_ok
-                })
-                .collect();
+                let header = Row::new(vec![
+                    Span::styled("Hop", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::styled("IP", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::styled("RTT", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::styled("ASN", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::styled("CC", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::styled("Owner", Style::default().add_modifier(Modifier::BOLD)),
+                ]);
 
-            let total_rows = filtered_rows.len();
-            let max_scroll = total_rows.saturating_sub(visible_rows);
-            let scroll = app.output_scroll.min(max_scroll);
-            let start = total_rows.saturating_sub(visible_rows + scroll);
-            let end = total_rows.saturating_sub(scroll);
-
-            let header = Row::new(
-                report
-                    .headers
+                let rows: Vec<Row> = app
+                    .traceroute_hops
                     .iter()
-                    .map(|h| Span::styled(h.clone(), Style::default().add_modifier(Modifier::BOLD)))
-                    .collect::<Vec<_>>(),
-            );
+                    .skip(start)
+                    .take(end.saturating_sub(start))
+                    .map(|hop| {
+                        Row::new(vec![
+                            Span::raw(hop.hop_index.to_string()),
+                            Span::raw(hop.ip.clone()),
+                            Span::raw(
+                                hop.rtt_ms
+                                    .map(|r| format!("{:.2} ms", r))
+                                    .unwrap_or_else(|| "-".to_string()),
+                            ),
+                            Span::raw(hop.asn.clone().unwrap_or_default()),
+                            Span::raw(hop.country.clone().unwrap_or_default()),
+                            Span::raw(hop.owner.clone().unwrap_or_default()),
+                        ])
+                    })
+                    .collect();
 
-            let rows: Vec<Row> = filtered_rows
-                .iter()
-                .skip(start)
-                .take(end.saturating_sub(start))
-                .map(|cols| {
-                    let section = cols.get(0).map(|s| s.as_str()).unwrap_or("");
-                    let section_style = match section {
-                        "IP" => Style::default().fg(Color::Cyan),
-                        "Domain" => Style::default().fg(Color::Yellow),
-                        s if s.starts_with("SIGINT") => Style::default().fg(Color::Magenta),
-                        "Traceroute" => Style::default().fg(Color::LightGreen),
-                        _ => Style::default(),
-                    };
+                let table = Table::new(rows)
+                    .header(header)
+                    .block(Block::default().borders(Borders::ALL).title("Traceroute detail"))
+                    .widths(&[
+                        Constraint::Length(4),
+                        Constraint::Length(16),
+                        Constraint::Length(12),
+                        Constraint::Length(10),
+                        Constraint::Length(4),
+                        Constraint::Min(10),
+                    ]);
+                f.render_widget(table, right_chunks[1]);
+            } else {
+                let visible_rows = (right_chunks[1].height as usize).saturating_sub(3);
 
-                    let mut spans = Vec::new();
-                    if let Some(sec) = cols.get(0) {
-                        spans.push(Span::styled(sec.clone(), section_style));
-                    }
-                    for c in cols.iter().skip(1) {
-                        spans.push(Span::raw(c.clone()));
-                    }
-                    Row::new(spans)
-                })
+                // Appliquer éventuel zoom de section et mode résumé
+                let filtered_rows: Vec<&Vec<String>> = report
+                    .rows
+                    .iter()
+                    .filter(|row| {
+                        let section = row.get(0).map(|s| s.as_str()).unwrap_or("");
+                        let section_ok = match &app.active_section {
+                            None => true,
+                            Some(active) => section == active,
+                        };
+                        let summary_ok = match app.report_mode {
+                            ReportMode::Full => true,
+                            ReportMode::Summary => match section {
+                                "IP" => matches!(
+                                    row.get(1).map(String::as_str),
+                                    Some("Adresse") | Some("Pays") | Some("ISP")
+                                ),
+                                "Domain" => matches!(
+                                    row.get(1).map(String::as_str),
+                                    Some("Host") | Some("Registrar")
+                                ),
+                                "SIGINT TCP" => matches!(row.get(1).map(String::as_str), Some("OS")),
+                                "Traceroute" => matches!(
+                                    row.get(1).map(String::as_str),
+                                    Some("Hops")
+                                ),
+                                _ => false,
+                            },
+                        };
+                        section_ok && summary_ok
+                    })
+                    .collect();
+
+                let total_rows = filtered_rows.len();
+                let max_scroll = total_rows.saturating_sub(visible_rows);
+                let scroll = app.output_scroll.min(max_scroll);
+                let start = total_rows.saturating_sub(visible_rows + scroll);
+                let end = total_rows.saturating_sub(scroll);
+
+                let header = Row::new(
+                    report
+                        .headers
+                        .iter()
+                        .map(|h| Span::styled(h.clone(), Style::default().add_modifier(Modifier::BOLD)))
+                        .collect::<Vec<_>>(),
+                );
+
+                let rows: Vec<Row> = filtered_rows
+                    .iter()
+                    .skip(start)
+                    .take(end.saturating_sub(start))
+                    .map(|cols| {
+                        let section = cols.get(0).map(|s| s.as_str()).unwrap_or("");
+                        let section_style = match section {
+                            "IP" => Style::default().fg(Color::Cyan),
+                            "Domain" => Style::default().fg(Color::Yellow),
+                            s if s.starts_with("SIGINT") => Style::default().fg(Color::Magenta),
+                            "Traceroute" => Style::default().fg(Color::LightGreen),
+                            _ => Style::default(),
+                        };
+
+                        let mut spans = Vec::new();
+                        if let Some(sec) = cols.get(0) {
+                            spans.push(Span::styled(sec.clone(), section_style));
+                        }
+                        for c in cols.iter().skip(1) {
+                            spans.push(Span::raw(c.clone()));
+                        }
+                        Row::new(spans)
+                    })
+                    .collect();
+
+                let table = Table::new(rows)
+                    .header(header)
+                    .block(Block::default().borders(Borders::ALL).title("Output"))
+                    .widths(&[
+                        Constraint::Length(14),
+                        Constraint::Length(16),
+                        Constraint::Min(10),
+                        Constraint::Min(10),
+                    ]);
+                f.render_widget(table, right_chunks[1]);
+            }
+        })
                 .collect();
 
             let table = Table::new(rows)
@@ -589,9 +667,16 @@ fn ui<B: ratatui::backend::Backend>(f: &mut ratatui::Frame<B>, app: &App) {
     f.render_widget(activity_widget, right_chunks[2]);
 
     // Status bar
+    let section_label = app.active_section.clone().unwrap_or_else(|| "Toutes".to_string());
+    let mode_label = match app.report_mode {
+        ReportMode::Full => "complet",
+        ReportMode::Summary => "résumé",
+    };
     let status_text = format!(
-        "Esc: retour / q: quitter  |  PgUp/PgDn/Scroll: output  |  a/z: activity  |  f: filtre activité='{}' (m:/t:/both) |  c: clear filtre  |  Tab: section suivante  |  r: résumé/complet",
-        app.activity_filter
+        "Esc: retour / q: quitter  |  PgUp/PgDn/Scroll: output  |  a/z: activity  |  f: filtre activité='{}' (m:/t:/both) |  c: clear filtre  |  Tab: section={}  |  r: mode={}",
+        app.activity_filter,
+        section_label,
+        mode_label,
     );
     let status = Paragraph::new(status_text)
         .style(Style::default().add_modifier(Modifier::DIM));
@@ -978,6 +1063,10 @@ fn run_profile_ip(app: &mut App, input: &str) {
 
     app.log.clear();
     app.report = ReportKind::None;
+    app.traceroute_hops.clear();
+    app.show_traceroute_detail = false;
+    app.active_section = None;
+    app.report_mode = ReportMode::Full;
     app.log_line(format!("=== Profil complet pour {} ===", ip));
 
     let mut rows = Vec::new();
@@ -1136,7 +1225,7 @@ fn run_profile_ip(app: &mut App, input: &str) {
         }
     }
 
-    // Traceroute (résumé)
+    // Traceroute (résumé + détail)
     let ip_str = ip.to_string();
     let max_hops: u8 = 20;
     let tr_engine = TracerouteSigintEngine::new();
@@ -1150,6 +1239,7 @@ fn run_profile_ip(app: &mut App, input: &str) {
                 res.hops.len().to_string(),
                 format!("AS path: {:?}", res.as_path),
             ]);
+            app.traceroute_hops = res.hops;
         }
         Err(e) => {
             app.log_line(format!("SIGINT Traceroute erreur: {}", e));
@@ -1159,6 +1249,7 @@ fn run_profile_ip(app: &mut App, input: &str) {
                 e.to_string(),
                 ip_str,
             ]);
+            app.traceroute_hops.clear();
         }
     }
 
