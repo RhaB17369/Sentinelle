@@ -9,6 +9,7 @@ pub mod metrics;
 pub mod monitoring;
 pub mod email_recon;
 pub mod domain_intel;
+pub mod latency_intel;
 
 pub use shared::{Email, EmailError};
 pub use intel::{
@@ -27,4 +28,8 @@ pub use email_recon::{EmailReconPort, EmailReconResult, DnsProviderHint};
 pub use domain_intel::{
     DomainIntelligencePort, DomainIntel, DomainIntelError,
     WhoisData, DnsRecords, SslData, HttpData,
+};
+pub use latency_intel::{
+    LatencyIntelligencePort, LatencyIntel, LatencyIntelError,
+    RttStats, LinkQuality, AsnInfo, TracerouteHop, TraceroutePath,
 };
