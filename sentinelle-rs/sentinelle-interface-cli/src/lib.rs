@@ -320,7 +320,25 @@ fn ui<B: ratatui::backend::Backend>(f: &mut ratatui::Frame<B>, app: &App) {
                 .skip(start)
                 .take(end.saturating_sub(start))
                 .map(|cols| {
-                    Row::new(cols.iter().map(|c| Span::raw(c.clone())).collect::<Vec<_>>())
+                    let section = cols.get(0).map(|s| s.as_str()).unwrap_or("");
+                    let section_style = match section {
+                        "IP" => Style::default().fg(Color::Cyan),
+                        "Domain" => Style::default().fg(Color::Yellow),
+                        s if s.starts_with("SIGINT") => Style::default().fg(Color::Magenta),
+                        "Traceroute" => Style::default().fg(Color::LightGreen),
+                        _ => Style::default(),
+                    };
+
+                    let mut spans = Vec::new();
+                    // Section column with style
+                    if let Some(sec) = cols.get(0) {
+                        spans.push(Span::styled(sec.clone(), section_style));
+                    }
+                    // Other columns as raw
+                    for c in cols.iter().skip(1) {
+                        spans.push(Span::raw(c.clone()));
+                    }
+                    Row::new(spans)
                 })
                 .collect();
 
@@ -357,7 +375,22 @@ fn ui<B: ratatui::backend::Backend>(f: &mut ratatui::Frame<B>, app: &App) {
                 .skip(start)
                 .take(end.saturating_sub(start))
                 .map(|cols| {
-                    Row::new(cols.iter().map(|c| Span::raw(c.clone())).collect::<Vec<_>>())
+                    let section = cols.get(0).map(|s| s.as_str()).unwrap_or("");
+                    let section_style = match section {
+                        "Mail OSINT" => Style::default().fg(Color::Cyan),
+                        "EmailRecon" => Style::default().fg(Color::Yellow),
+                        "Social" => Style::default().fg(Color::Magenta),
+                        _ => Style::default(),
+                    };
+
+                    let mut spans = Vec::new();
+                    if let Some(sec) = cols.get(0) {
+                        spans.push(Span::styled(sec.clone(), section_style));
+                    }
+                    for c in cols.iter().skip(1) {
+                        spans.push(Span::raw(c.clone()));
+                    }
+                    Row::new(spans)
                 })
                 .collect();
 
