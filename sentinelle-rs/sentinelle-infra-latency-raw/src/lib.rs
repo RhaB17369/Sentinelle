@@ -133,9 +133,9 @@ impl TcpSigintEngine {
         let timeout = Duration::from_secs(3);
         let mut buf = [0u8; 4096];
 
-        while start.elapsed() &lt; timeout {
+        while start.elapsed() < timeout {
             match rx.recv_from(&mut buf) {
-                Ok((size, addr)) =&gt; {
+                Ok((size, addr)) => {
                     if addr != std::net::IpAddr::V4(ip) {
                         continue;
                     }
@@ -147,8 +147,8 @@ impl TcpSigintEngine {
                             if tcp.get_destination() != 40000 {
                                 continue;
                             }
-                            if tcp.get_flags() &amp; TcpFlags::SYN == TcpFlags::SYN
-                                &amp;&amp; tcp.get_flags() &amp; TcpFlags::ACK == TcpFlags::ACK
+                            if tcp.get_flags() & TcpFlags::SYN == TcpFlags::SYN
+                                && tcp.get_flags() & TcpFlags::ACK == TcpFlags::ACK
                             {
                                 let win = tcp.get_window();
                                 let ttl = Some(ipv4.get_ttl());
@@ -163,27 +163,27 @@ impl TcpSigintEngine {
 
                                 if let Some(raw_opts) = tcp.get_options_raw() {
                                     let mut i = 0;
-                                    while i &lt; raw_opts.len() {
+                                    while i < raw_opts.len() {
                                         let kind = raw_opts[i];
                                         match kind {
-                                            0 =&gt; {
+                                            0 => {
                                                 options.push("EOL".to_string());
                                                 break;
                                             }
-                                            1 =&gt; {
+                                            1 => {
                                                 options.push("NOP".to_string());
                                                 i += 1;
                                             }
-                                            2 =&gt; {
-                                                if i + 4 &lt;= raw_opts.len() {
+                                            2 => {
+                                                if i + 4 <= raw_opts.len() {
                                                     options.push("MSS".to_string());
                                                     i += 4;
                                                 } else {
                                                     break;
                                                 }
                                             }
-                                            3 =&gt; {
-                                                if i + 3 &lt;= raw_opts.len() {
+                                            3 => {
+                                                if i + 3 <= raw_opts.len() {
                                                     wscale = Some(raw_opts[i + 2]);
                                                     options.push("WS".to_string());
                                                     i += 3;
@@ -191,13 +191,13 @@ impl TcpSigintEngine {
                                                     break;
                                                 }
                                             }
-                                            4 =&gt; {
+                                            4 => {
                                                 options.push("SACK".to_string());
                                                 sack_permitted = true;
                                                 i += 2;
                                             }
-                                            8 =&gt; {
-                                                if i + 10 &lt;= raw_opts.len() {
+                                            8 => {
+                                                if i + 10 <= raw_opts.len() {
                                                     let ts_bytes = &raw_opts[i + 2..i + 10];
                                                     let ts_val_u32 = u32::from_be_bytes([
                                                         ts_bytes[0], ts_bytes[1],
@@ -215,11 +215,11 @@ impl TcpSigintEngine {
                                                     break;
                                                 }
                                             }
-                                            _ =&gt; {
+                                            _ => {
                                                 // Option inconnue : lire longueur et sauter
-                                                if i + 2 &lt;= raw_opts.len() {
+                                                if i + 2 <= raw_opts.len() {
                                                     let len = raw_opts[i + 1] as usize;
-                                                    if len &lt; 2 || i + len &gt; raw_opts.len() {
+                                                    if len < 2 || i + len > raw_opts.len() {
                                                         break;
                                                     }
                                                     options.push(format!("OPT{}", kind));
@@ -246,12 +246,13 @@ impl TcpSigintEngine {
                         }
                     }
                 }
-                Err(_) =&gt; continue,
+                Err(_) => continue,
             }
         }
 
         None
     }
+}
 
 impl SigintTcpPort for TcpSigintEngine {
     fn probe(&self, target: IpAddr, port: u16) -> Result<TcpSigintResult, TcpSigintError> {

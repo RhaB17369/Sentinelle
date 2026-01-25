@@ -58,7 +58,7 @@ impl SqliteCache {
         Ok(Self { conn })
     }
 
-    pub fn get(&self, key: &str) -> Result<Option<CacheRow>, CacheError> {
+    fn get(&self, key: &str) -> Result<Option<CacheRow>, CacheError> {
         let mut stmt = self
             .conn
             .prepare("SELECT value, updated_at FROM cache WHERE key = ?1")
