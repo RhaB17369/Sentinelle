@@ -1,0 +1,20 @@
+[workspace]
+members = [
+    "sentinelle-domain",
+    "sentinelle-application",
+    "sentinelle-infra-graph",
+    "sentinelle-infra-osint-ip",
+    "sentinelle-infra-osint-mail",
+    "sentinelle-infra-osint-social",
+    "sentinelle-infra-email-recon",
+    "sentinelle-infra-domain-intel",
+    "sentinelle-infra-latency-intel",
+    "sentinelle-infra-latency-raw",
+    "sentinelle-infra-phone-intel",
+    "sentinelle-infra-cache-sqlite",
+    "sentinelle-infra-metrics",
+    "sentinelle-interface-cli",
+    "sentinelle-bin",
+]
+
+resolver = "2"
