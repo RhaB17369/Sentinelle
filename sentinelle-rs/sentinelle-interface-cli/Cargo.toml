@@ -13,10 +13,13 @@ sentinelle-infra-email-recon = { path = "../sentinelle-infra-email-recon" }
 sentinelle-infra-domain-intel = { path = "../sentinelle-infra-domain-intel" }
 sentinelle-infra-metrics = { path = "../sentinelle-infra-metrics" }
 sentinelle-infra-latency-raw = { path = "../sentinelle-infra-latency-raw" }
+sentinelle-infra-cache-sqlite = { path = "../sentinelle-infra-cache-sqlite" }
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
 crossterm = "0.27"
 ratatui = "0.26"
-dns-lookup = "1.0"ackage]
+dns-lookup = "1.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"ackage]
 name = "sentinelle-interface-cli"
 version = "0.1.0"
 edition = "2021"

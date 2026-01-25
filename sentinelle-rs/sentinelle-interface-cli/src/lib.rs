@@ -31,8 +31,10 @@ use sentinelle_infra_osint_mail::MailOsintEngine;
 use sentinelle_infra_osint_social::SocialOsintEngine;
 use sentinelle_infra_email_recon::EmailReconEngine;
 use sentinelle_infra_domain_intel::DomainIntelEngine;
+use sentinelle_infra_cache_sqlite::SqliteCache;
 use std::io;
 use std::net::IpAddr;
+use serde::{Serialize, Deserialize};
 
 const BANNER: &[&str] = &[
     "  ███████╗███████╗███╗   ██╗████████╗██╗███╗   ██╗██╗     ███████╗",
@@ -55,20 +57,31 @@ enum View {
     ProfileEmailInput,
 }
 
+#[derive(Serialize, Deserialize)]
+struct CachedLog {
+    lines: Vec<String>,
+}
+
 struct App {
     view: View,
     input: String,
     log: Vec<String>,
     selected_menu: usize,
+    cache: SqliteCache,
 }
 
 impl App {
     fn new() -> Self {
+        let cache = SqliteCache::new("sentinelle_cache.db").unwrap_or_else(|_| {
+            // En dernier recours, un cache en mémoire temp (fichier éphémère)
+            SqliteCache::new(":memory:").expect("cache sqlite")
+        });
         Self {
             view: View::MainMenu,
             input: String::new(),
             log: Vec::new(),
             selected_menu: 0,
+            cache,
         }
     }
 
@@ -77,6 +90,22 @@ impl App {
         if self.log.len() > 200 {
             self.log.drain(0..self.log.len() - 200);
         }
+    }
+
+    fn cache_load(&mut self, key: &str) -> bool {
+        if let Ok(Some(cached)) = self.cache.get_json::<CachedLog>(key) {
+            self.log = cached.lines;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn cache_save(&self, key: &str) {
+        let cached = CachedLog {
+            lines: self.log.clone(),
+        };
+        let _ = self.cache.set_json(key, &cached);
     }
 }
 
@@ -490,6 +519,13 @@ fn run_profile_ip(app: &mut App, input: &str) {
         }
     };
 
+    let cache_key = format!("profile_ip:{}", ip);
+    if app.cache_load(&cache_key) {
+        app.log_line(format!("(cache) Profil déjà calculé pour {}", ip));
+        return;
+    }
+
+    app.log.clear();
     app.log_line(format!("=== Profil complet pour {} ===", ip));
 
     // IP Intelligence
@@ -540,6 +576,8 @@ fn run_profile_ip(app: &mut App, input: &str) {
     run_sigint_traceroute(app, input);
 
     app.log_line(format!("=== Fin du profil pour {} ===", ip));
+
+    app.cache_save(&cache_key);
 }
 
 fn run_profile_email(app: &mut App, input: &str) {
@@ -551,6 +589,13 @@ fn run_profile_email(app: &mut App, input: &str) {
         }
     };
 
+    let cache_key = format!("profile_email:{}", email.as_str());
+    if app.cache_load(&cache_key) {
+        app.log_line(format!("(cache) Profil email déjà calculé pour {}", email.as_str()));
+        return;
+    }
+
+    app.log.clear();
     app.log_line(format!("=== Profil complet Email pour {} ===", email.as_str()));
 
     // Mail OSINT (présence sur services)
@@ -604,4 +649,6 @@ fn run_profile_email(app: &mut App, input: &str) {
     }
 
     app.log_line("=== Fin du profil Email ===");
+
+    app.cache_save(&cache_key);
 }
