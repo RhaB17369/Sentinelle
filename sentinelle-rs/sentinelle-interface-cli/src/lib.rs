@@ -90,6 +90,7 @@ struct App {
     output_scroll: usize,
     activity_scroll: usize,
     report: ReportKind,
+    activity_filter: String,
 }
 
 impl App {
@@ -110,6 +111,7 @@ impl App {
             output_scroll: 0,
             activity_scroll: 0,
             report: ReportKind::None,
+            activity_filter: String::new(),
         }
     }
 
@@ -391,9 +393,20 @@ fn ui<B: ratatui::backend::Backend>(f: &mut ratatui::Frame<B>, app: &App) {
         }
     }
 
-    // Activity pane avec scroll et rendu tabulaire
+    // Activity pane avec filtre, scroll et rendu tabulaire
+    let filtered_activity: Vec<&ActivityEvent> = if app.activity_filter.is_empty() {
+        app.activity.iter().collect()
+    } else {
+        app.activity
+            .iter()
+            .filter(|ev| {
+                ev.module.contains(&app.activity_filter) || ev.target.contains(&app.activity_filter)
+            })
+            .collect()
+    };
+
     let visible_activity_lines = (right_chunks[2].height as usize).saturating_sub(3); // header + bordures
-    let total_activity_lines = app.activity.len();
+    let total_activity_lines = filtered_activity.len();
     let max_activity_scroll = total_activity_lines.saturating_sub(visible_activity_lines);
     let activity_scroll = app.activity_scroll.min(max_activity_scroll);
     let a_start = total_activity_lines.saturating_sub(visible_activity_lines + activity_scroll);
@@ -407,12 +420,12 @@ fn ui<B: ratatui::backend::Backend>(f: &mut ratatui::Frame<B>, app: &App) {
         Span::styled("Status", Style::default().add_modifier(Modifier::BOLD)),
     ]);
 
-    let rows: Vec<Row> = app
-        .activity
+    let rows: Vec<Row> = filtered_activity
         .iter()
         .skip(a_start)
         .take(a_end.saturating_sub(a_start))
         .map(|ev| {
+            let ev = *ev;
             let dt = NaiveDateTime::from_timestamp_opt(ev.ts as i64, 0)
                 .unwrap_or_else(|| NaiveDateTime::from_timestamp_opt(0, 0).unwrap());
             let ts_str = dt.format("%Y-%m-%d %H:%M:%S").to_string();
@@ -444,7 +457,11 @@ fn ui<B: ratatui::backend::Backend>(f: &mut ratatui::Frame<B>, app: &App) {
     f.render_widget(activity_widget, right_chunks[2]);
 
     // Status bar
-    let status = Paragraph::new("Esc: retour / q: quitter  |  PgUp/PgDn: scroll output  |  a/z: scroll activity")
+    let status_text = format!(
+        "Esc: retour / q: quitter  |  PgUp/PgDn/Scroll: output  |  a/z: activity  |  f: filtre activité='{}'  |  c: clear filtre",
+        app.activity_filter
+    );
+    let status = Paragraph::new(status_text)
         .style(Style::default().add_modifier(Modifier::DIM));
     f.render_widget(status, outer[2]);
 }
@@ -474,6 +491,14 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, io::Error> {
             }
             KeyCode::Char('z') => {
                 app.activity_scroll = app.activity_scroll.saturating_sub(1);
+            }
+            KeyCode::Char('f') => {
+                app.activity_filter = app.input.trim().to_string();
+                app.activity_scroll = 0;
+            }
+            KeyCode::Char('c') => {
+                app.activity_filter.clear();
+                app.activity_scroll = 0;
             }
             KeyCode::Enter => {
                 app.input.clear();
@@ -765,12 +790,6 @@ fn run_profile_ip(app: &mut App, input: &str) {
     app.report = ReportKind::None;
     app.log_line(format!("=== Profil complet pour {} ===", ip));
 
-    let mut headers = vec![
-        "Section".to_string(),
-        "Clé".to_string(),
-        "Valeur".to_string(),
-        "Détail".to_string(),
-    ];
     let mut rows = Vec::new();
 
     // IP Intelligence
@@ -954,6 +973,16 @@ fn run_profile_ip(app: &mut App, input: &str) {
     }
 
     app.log_line(format!("=== Fin du profil pour {} ===", ip));
+
+    // Tri des lignes par section pour regrouper IP / Domain / SIGINT / Traceroute
+    rows.sort_by(|a, b| a[0].cmp(&b[0]));
+
+    let headers = vec![
+        "Section".to_string(),
+        "Clé".to_string(),
+        "Valeur".to_string(),
+        "Détail".to_string(),
+    ];
 
     app.report = ReportKind::Ip(ReportIp { headers, rows });
     app.cache_save(&cache_key);
