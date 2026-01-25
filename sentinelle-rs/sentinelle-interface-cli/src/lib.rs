@@ -14,7 +14,14 @@ use ratatui::{
     Terminal,
 };
 use sentinelle_application::usecases::{
-    RunIpIntelligence, RunMailScan, RunSocialScan, RunSigintTcp, RunSigintIcmp, RunSigintTraceroute,
+    RunIpIntelligence,
+    RunMailScan,
+    RunSocialScan,
+    RunSigintTcp,
+    RunSigintIcmp,
+    RunSigintTraceroute,
+    RunDomainIntel,
+    RunEmailRecon,
 };
 use sentinelle_domain::{Email, SocialTarget};
 use sentinelle_infra_latency_raw::{TcpSigintEngine, IcmpSigintEngine, TracerouteSigintEngine};
@@ -22,6 +29,8 @@ use sentinelle_infra_metrics::InMemoryMetrics;
 use sentinelle_infra_osint_ip::CompositeIpIntelligence;
 use sentinelle_infra_osint_mail::MailOsintEngine;
 use sentinelle_infra_osint_social::SocialOsintEngine;
+use sentinelle_infra_email_recon::EmailReconEngine;
+use sentinelle_infra_domain_intel::DomainIntelEngine;
 use std::io;
 use std::net::IpAddr;
 
@@ -488,6 +497,19 @@ fn run_profile(app: &mut App, input: &str) {
             app.log_line(format!("IP Intel: {:?}", intel));
         }
         Err(e) => app.log_line(format!("IP Intel erreur: {}", e)),
+    }
+
+    // Domain Intelligence (si FQDN associé fourni par l'utilisateur)
+    // Pour l'instant, on utilise le reverse DNS simple comme FQDN candidat.
+    if let Ok(host) = dns_lookup::lookup_addr(&ip) {
+        let domain_engine = DomainIntelEngine::new();
+        let domain_usecase = RunDomainIntel::new(&domain_engine);
+        match domain_usecase.execute(&host) {
+            Ok(dintel) => {
+                app.log_line(format!("DomainIntel pour {}: {:?}", host, dintel));
+            }
+            Err(e) => app.log_line(format!("DomainIntel erreur pour {}: {}", host, e)),
+        }
     }
 
     // SIGINT TCP (port 443)

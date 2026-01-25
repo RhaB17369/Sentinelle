@@ -9,11 +9,14 @@ sentinelle-application = { path = "../sentinelle-application" }
 sentinelle-infra-osint-ip = { path = "../sentinelle-infra-osint-ip" }
 sentinelle-infra-osint-mail = { path = "../sentinelle-infra-osint-mail" }
 sentinelle-infra-osint-social = { path = "../sentinelle-infra-osint-social" }
+sentinelle-infra-email-recon = { path = "../sentinelle-infra-email-recon" }
+sentinelle-infra-domain-intel = { path = "../sentinelle-infra-domain-intel" }
 sentinelle-infra-metrics = { path = "../sentinelle-infra-metrics" }
 sentinelle-infra-latency-raw = { path = "../sentinelle-infra-latency-raw" }
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
 crossterm = "0.27"
-ratatui = "0.26"ackage]
+ratatui = "0.26"
+dns-lookup = "1.0"ackage]
 name = "sentinelle-interface-cli"
 version = "0.1.0"
 edition = "2021"
