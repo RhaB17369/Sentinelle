@@ -1,78 +1,254 @@
 #![deny(warnings)]
 
+use crossterm::{
+    event::{self, Event, KeyCode, KeyEvent},
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+};
+use ratatui::{
+    backend::CrosstermBackend,
+    layout::{Constraint, Direction, Layout},
+    style::{Modifier, Style},
+    text::{Span, Spans},
+    widgets::{Block, Borders, List, ListItem, Paragraph},
+    Terminal,
+};
 use sentinelle_application::usecases::{
-    RunIpIntelligence,
-    RunMailScan,
-    RunSocialScan,
-    RunSigintTcp,
-    RunSigintIcmp,
-    RunSigintTraceroute,
+    RunIpIntelligence, RunMailScan, RunSocialScan, RunSigintTcp, RunSigintIcmp, RunSigintTraceroute,
 };
 use sentinelle_domain::{Email, SocialTarget};
+use sentinelle_infra_latency_raw::{TcpSigintEngine, IcmpSigintEngine, TracerouteSigintEngine};
 use sentinelle_infra_metrics::InMemoryMetrics;
 use sentinelle_infra_osint_ip::CompositeIpIntelligence;
 use sentinelle_infra_osint_mail::MailOsintEngine;
 use sentinelle_infra_osint_social::SocialOsintEngine;
-use sentinelle_infra_latency_raw::{TcpSigintEngine, IcmpSigintEngine, TracerouteSigintEngine};
-use std::io::{self, Write};
+use std::io;
 use std::net::IpAddr;
 
-/// CLI minimaliste, remplacera progressivement app.py (Rich-based).
-/// Ici, on teste l'intégration des use cases et des adapters, y compris SIGINT.
-pub fn run_cli() {
+enum View {
+    MainMenu,
+    IpInput,
+    MailInput,
+    SocialInput,
+    SigintTcpInput,
+    SigintIcmpInput,
+    SigintTracerouteInput,
+}
+
+struct App {
+    view: View,
+    input: String,
+    log: Vec<String>,
+    selected_menu: usize,
+}
+
+impl App {
+    fn new() -> Self {
+        Self {
+            view: View::MainMenu,
+            input: String::new(),
+            log: Vec::new(),
+            selected_menu: 0,
+        }
+    }
+
+    fn log_line(&mut self, line: impl Into<String>) {
+        self.log.push(line.into());
+        if self.log.len() > 200 {
+            self.log.drain(0..self.log.len() - 200);
+        }
+    }
+}
+
+pub fn run_cli() -> Result<(), io::Error> {
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+    let mut app = App::new();
+
+    let res = main_loop(&mut terminal, &mut app);
+
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    terminal.show_cursor()?;
+
+    if let Err(e) = res {
+        eprintln!("Erreur TUI: {}", e);
+    }
+
+    Ok(())
+}
+
+fn main_loop<B: ratatui::backend::Backend>(
+    terminal: &mut Terminal<B>,
+    app: &mut App,
+) -> Result<(), io::Error> {
     loop {
-        println!("SENTINELLE CLI (Rust) - sélectionnez un module :");
-        println!("1) IP Intelligence");
-        println!("2) Mail OSINT");
-        println!("3) Social OSINT");
-        println!("4) SIGINT TCP");
-        println!("5) SIGINT ICMP");
-        println!("6) SIGINT Traceroute");
-        println!("q) Quitter");
-        print!("> ");
-        let _ = io::stdout().flush();
+        terminal.draw(|f| ui(f, app))?;
 
-        let mut line = String::new();
-        if io::stdin().read_line(&mut line).is_err() {
-            eprintln!("Lecture entrée échouée");
-            continue;
-        }
-
-        let choice = line.trim();
-        match choice {
-            "1" => run_ip(),
-            "2" => run_mail(),
-            "3" => run_social(),
-            "4" => run_sigint_tcp(),
-            "5" => run_sigint_icmp(),
-            "6" => run_sigint_traceroute(),
-            "q" | "Q" => break,
-            _ => println!("Choix invalide"),
+        if crossterm::event::poll(std::time::Duration::from_millis(200))? {
+            match event::read()? {
+                Event::Key(key) => {
+                    if !handle_key(app, key)? {
+                        break;
+                    }
+                }
+                _ => {}
+            }
         }
     }
+    Ok(())
 }
 
-fn read_ip(prompt: &str) -> Option<IpAddr> {
-    print!("{prompt}");
-    let _ = io::stdout().flush();
-    let mut ip_s = String::new();
-    if io::stdin().read_line(&mut ip_s).is_err() {
-        eprintln!("Erreur de lecture");
-        return None;
+fn ui<B: ratatui::backend::Backend>(f: &mut ratatui::Frame<B>, app: &App) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Min(5),
+        ])
+        .split(f.size());
+
+    // Header
+    let header = Paragraph::new("SENTINELLE TUI - OSINT / SIGINT")
+        .style(Style::default().add_modifier(Modifier::BOLD));
+    f.render_widget(header, chunks[0]);
+
+    // Menu or input prompt
+    match app.view {
+        View::MainMenu => {
+            let items = vec![
+                "IP Intelligence",
+                "Mail OSINT",
+                "Social OSINT",
+                "SIGINT TCP",
+                "SIGINT ICMP",
+                "SIGINT Traceroute",
+                "Quitter",
+            ];
+            let list_items: Vec<ListItem> = items
+                .iter()
+                .enumerate()
+                .map(|(i, item)| {
+                    if i == app.selected_menu {
+                        ListItem::new(Spans::from(Span::styled(
+                            *item,
+                            Style::default().add_modifier(Modifier::REVERSED),
+                        )))
+                    } else {
+                        ListItem::new(Spans::from(Span::raw(*item)))
+                    }
+                })
+                .collect();
+            let menu = List::new(list_items)
+                .block(Block::default().borders(Borders::ALL).title("Menu"));
+            f.render_widget(menu, chunks[1]);
+        }
+        _ => {
+            let prompt = match app.view {
+                View::IpInput => "IP cible (IP Intel): ",
+                View::MailInput => "Email cible: ",
+                View::SocialInput => "Username cible: ",
+                View::SigintTcpInput => "IP:port pour SIGINT TCP (ex: 1.2.3.4:443): ",
+                View::SigintIcmpInput => "IP cible (SIGINT ICMP): ",
+                View::SigintTracerouteInput => "IP cible (SIGINT Traceroute): ",
+                View::MainMenu => "",
+            };
+            let input = Paragraph::new(app.input.as_str())
+                .block(Block::default().borders(Borders::ALL).title(prompt));
+            f.render_widget(input, chunks[1]);
+        }
     }
-    let ip_s = ip_s.trim();
-    match ip_s.parse() {
-        Ok(ip) => Some(ip),
+
+    // Log / output pane
+    let log_lines: Vec<Spans> = app
+        .log
+        .iter()
+        .rev()
+        .take((chunks[2].height as usize).saturating_sub(2))
+        .rev()
+        .map(|l| Spans::from(Span::raw(l.as_str())))
+        .collect();
+
+    let log_widget = Paragraph::new(log_lines)
+        .block(Block::default().borders(Borders::ALL).title("Output"));
+    f.render_widget(log_widget, chunks[2]);
+}
+
+fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, io::Error> {
+    match app.view {
+        View::MainMenu => match key.code {
+            KeyCode::Char('q') | KeyCode::Esc => return Ok(false),
+            KeyCode::Up => {
+                if app.selected_menu > 0 {
+                    app.selected_menu -= 1;
+                }
+            }
+            KeyCode::Down => {
+                if app.selected_menu < 6 {
+                    app.selected_menu += 1;
+                }
+            }
+            KeyCode::Enter => {
+                app.input.clear();
+                app.log.clear();
+                match app.selected_menu {
+                    0 => app.view = View::IpInput,
+                    1 => app.view = View::MailInput,
+                    2 => app.view = View::SocialInput,
+                    3 => app.view = View::SigintTcpInput,
+                    4 => app.view = View::SigintIcmpInput,
+                    5 => app.view = View::SigintTracerouteInput,
+                    6 => return Ok(false),
+                    _ => {}
+                }
+            }
+            _ => {}
+        },
+        _ => match key.code {
+            KeyCode::Esc => {
+                app.view = View::MainMenu;
+                app.input.clear();
+            }
+            KeyCode::Enter => {
+                // Valider l'input et lancer le module correspondant
+                let input = app.input.trim().to_string();
+                match app.view {
+                    View::IpInput => run_ip(app, &input),
+                    View::MailInput => run_mail(app, &input),
+                    View::SocialInput => run_social(app, &input),
+                    View::SigintTcpInput => run_sigint_tcp(app, &input),
+                    View::SigintIcmpInput => run_sigint_icmp(app, &input),
+                    View::SigintTracerouteInput => run_sigint_traceroute(app, &input),
+                    View::MainMenu => {}
+                }
+                app.view = View::MainMenu;
+                app.input.clear();
+            }
+            KeyCode::Char(c) => {
+                app.input.push(c);
+            }
+            KeyCode::Backspace => {
+                app.input.pop();
+            }
+            _ => {}
+        },
+    }
+    Ok(true)
+}
+
+// ---------- Handlers ----------
+
+fn run_ip(app: &mut App, input: &str) {
+    let ip: IpAddr = match input.parse() {
+        Ok(ip) => ip,
         Err(_) => {
-            eprintln!("Adresse IP invalide: {}", ip_s);
-            None
+            app.log_line(format!("Adresse IP invalide: {}", input));
+            return;
         }
-    }
-}
-
-fn run_ip() {
-    let Some(ip) = read_ip("IP cible: ") else {
-        return;
     };
 
     let http = reqwest::Client::new();
@@ -82,35 +258,26 @@ fn run_ip() {
 
     match usecase.execute(ip) {
         Ok(intel) => {
-            println!("Résultats IP pour {}", intel.ip);
+            app.log_line(format!("IP Intelligence pour {}", intel.ip));
             if let Some(country) = intel.country {
-                println!("  Pays        : {}", country);
+                app.log_line(format!("  Pays        : {}", country));
             }
             if let Some(city) = intel.city {
-                println!("  Ville       : {}", city);
+                app.log_line(format!("  Ville       : {}", city));
             }
             if let Some(isp) = intel.isp {
-                println!("  ISP         : {}", isp);
+                app.log_line(format!("  ISP         : {}", isp));
             }
         }
-        Err(e) => eprintln!("Erreur IP: {}", e),
+        Err(e) => app.log_line(format!("Erreur IP: {}", e)),
     }
 }
 
-fn run_mail() {
-    print!("Email cible: ");
-    let _ = io::stdout().flush();
-    let mut email_s = String::new();
-    if io::stdin().read_line(&mut email_s).is_err() {
-        eprintln!("Erreur de lecture");
-        return;
-    }
-
-    let email_s = email_s.trim();
-    let email = match Email::parse(email_s) {
+fn run_mail(app: &mut App, input: &str) {
+    let email = match Email::parse(input) {
         Ok(e) => e,
         Err(e) => {
-            eprintln!("Email invalide: {}", e);
+            app.log_line(format!("Email invalide: {}", e));
             return;
         }
     };
@@ -120,96 +287,104 @@ fn run_mail() {
 
     match usecase.execute(email) {
         Ok(summary) => {
-            println!("Résultats Mail pour {}", summary.email.as_str());
+            app.log_line(format!("Mail OSINT pour {}", summary.email.as_str()));
             for svc in summary.services {
-                println!(
+                app.log_line(format!(
                     "  {:20} exists={} error={}",
                     svc.service_name, svc.exists, svc.error
-                );
+                ));
             }
         }
-        Err(e) => eprintln!("Erreur Mail: {}", e),
+        Err(e) => app.log_line(format!("Erreur Mail: {}", e)),
     }
 }
 
-fn run_social() {
-    print!("Username cible: ");
-    let _ = io::stdout().flush();
-    let mut u = String::new();
-    if io::stdin().read_line(&mut u).is_err() {
-        eprintln!("Erreur de lecture");
-        return;
-    }
-
-    let username = u.trim().to_string();
+fn run_social(app: &mut App, input: &str) {
+    let username = input.trim();
     if username.is_empty() {
-        eprintln!("Username vide");
+        app.log_line("Username vide");
         return;
     }
 
     let engine = SocialOsintEngine::new_with_default_probes();
     let usecase = RunSocialScan::new(&engine);
+    let target = SocialTarget::Username(username.to_string());
 
-    let target = SocialTarget::Username(username);
     match usecase.execute(target) {
         Ok(result) => {
-            println!("Résultats Social pour cible");
+            app.log_line("Social OSINT:");
             for acc in result.accounts {
-                println!(
+                app.log_line(format!(
                     "  {:20} status={:?} url={:?}",
                     acc.site_name, acc.status, acc.profile_url
-                );
+                ));
             }
         }
-        Err(e) => eprintln!("Erreur Social: {}", e),
+        Err(e) => app.log_line(format!("Erreur Social: {}", e)),
     }
 }
 
-fn run_sigint_tcp() {
-    let Some(ip) = read_ip("IP cible (SIGINT TCP): ") else {
-        return;
-    };
-
-    print!("Port cible (par défaut 443): ");
-    let _ = io::stdout().flush();
-    let mut p = String::new();
-    if io::stdin().read_line(&mut p).is_err() {
-        eprintln!("Erreur de lecture");
+fn run_sigint_tcp(app: &mut App, input: &str) {
+    let parts: Vec<&str> = input.split(':').collect();
+    if parts.len() != 2 {
+        app.log_line("Format attendu: IP:PORT, ex: 1.2.3.4:443");
         return;
     }
-    let port: u16 = p.trim().parse().unwrap_or(443);
+
+    let ip: IpAddr = match parts[0].parse() {
+        Ok(ip) => ip,
+        Err(_) => {
+            app.log_line(format!("Adresse IP invalide: {}", parts[0]));
+            return;
+        }
+    };
+
+    let port: u16 = match parts[1].parse() {
+        Ok(p) => p,
+        Err(_) => {
+            app.log_line(format!("Port invalide: {}", parts[1]));
+            return;
+        }
+    };
 
     let engine = TcpSigintEngine::new();
     let usecase = RunSigintTcp::new(&engine);
 
     match usecase.execute(ip, port) {
         Ok(res) => {
-            println!("SIGINT TCP pour {}:{}", res.target, res.port);
+            app.log_line(format!("SIGINT TCP pour {}:{}", res.target, res.port));
             if let Some(fp) = res.fingerprint {
-                println!("  Window size : {}", fp.window_size);
-                println!("  Options     : {:?}", fp.options);
-                println!("  WScale      : {:?}", fp.wscale);
-                println!("  SACK        : {}", fp.sack_permitted);
-                println!("  TS val/Ecr  : {:?} / {:?}", fp.ts_val, fp.ts_ecr);
-                println!("  TTL         : {:?}", fp.ttl);
-                println!("  IP ID       : {:?}", fp.ip_id);
+                app.log_line(format!("  Window size : {}", fp.window_size));
+                app.log_line(format!("  Options     : {:?}", fp.options));
+                app.log_line(format!("  WScale      : {:?}", fp.wscale));
+                app.log_line(format!("  SACK        : {}", fp.sack_permitted));
+                app.log_line(format!("  TS val/Ecr  : {:?} / {:?}", fp.ts_val, fp.ts_ecr));
+                app.log_line(format!("  TTL         : {:?}", fp.ttl));
+                app.log_line(format!("  IP ID       : {:?}", fp.ip_id));
             } else {
-                println!("  Aucun fingerprint TCP obtenu");
+                app.log_line("  Aucun fingerprint TCP obtenu");
             }
             if let Some(skew) = res.clock_skew {
-                println!("  Clock skew  : {} ({} samples)", skew.hz, skew.sample_count);
+                app.log_line(format!(
+                    "  Clock skew  : {} ({} samples)",
+                    skew.hz, skew.sample_count
+                ));
             }
             if let Some(os) = res.os_guess {
-                println!("  OS guess    : {}", os);
+                app.log_line(format!("  OS guess    : {}", os));
             }
         }
-        Err(e) => eprintln!("Erreur SIGINT TCP: {}", e),
+        Err(e) => app.log_line(format!("Erreur SIGINT TCP: {}", e)),
     }
 }
 
-fn run_sigint_icmp() {
-    let Some(ip) = read_ip("IP cible (SIGINT ICMP): ") else {
-        return;
+fn run_sigint_icmp(app: &mut App, input: &str) {
+    let ip: IpAddr = match input.parse() {
+        Ok(ip) => ip,
+        Err(_) => {
+            app.log_line(format!("Adresse IP invalide: {}", input));
+            return;
+        }
     };
 
     let engine = IcmpSigintEngine::new();
@@ -217,50 +392,50 @@ fn run_sigint_icmp() {
 
     match usecase.execute(ip) {
         Ok(res) => {
-            println!("SIGINT ICMP pour {}", res.target);
+            app.log_line(format!("SIGINT ICMP pour {}", res.target));
             if let Some(series) = res.ip_id_series {
-                println!("  IP IDs      : {:?}", series.ids);
-                println!("  Classification : {}", series.classification);
+                app.log_line(format!("  IP IDs      : {:?}", series.ids));
+                app.log_line(format!("  Classification : {}", series.classification));
             } else {
-                println!("  Aucune IP ID series disponible");
+                app.log_line("  Aucune IP ID series disponible");
             }
             if let Some(skew) = res.clock_skew {
-                println!("  Clock skew  : {} ({} samples)", skew.hz, skew.sample_count);
+                app.log_line(format!(
+                    "  Clock skew  : {} ({} samples)",
+                    skew.hz, skew.sample_count
+                ));
             }
         }
-        Err(e) => eprintln!("Erreur SIGINT ICMP: {}", e),
+        Err(e) => app.log_line(format!("Erreur SIGINT ICMP: {}", e)),
     }
 }
 
-fn run_sigint_traceroute() {
-    let Some(ip) = read_ip("IP cible (SIGINT Traceroute): ") else {
-        return;
+fn run_sigint_traceroute(app: &mut App, input: &str) {
+    let ip: IpAddr = match input.parse() {
+        Ok(ip) => ip,
+        Err(_) => {
+            app.log_line(format!("Adresse IP invalide: {}", input));
+            return;
+        }
     };
 
-    print!("Max hops (par défaut 20): ");
-    let _ = io::stdout().flush();
-    let mut h = String::new();
-    if io::stdin().read_line(&mut h).is_err() {
-        eprintln!("Erreur de lecture");
-        return;
-    }
-    let max_hops: u8 = h.trim().parse().unwrap_or(20);
+    let max_hops: u8 = 20;
 
     let engine = TracerouteSigintEngine::new();
     let usecase = RunSigintTraceroute::new(&engine);
 
     match usecase.execute(ip, max_hops) {
         Ok(res) => {
-            println!("SIGINT Traceroute pour {}", res.target);
+            app.log_line(format!("SIGINT Traceroute pour {}", res.target));
             for hop in res.hops {
-                println!(
+                app.log_line(format!(
                     "  {:2} {}  rtt={:?}  ASN={:?}  CC={:?}  Owner={:?}",
                     hop.hop_index, hop.ip, hop.rtt_ms, hop.asn, hop.country, hop.owner
-                );
+                ));
             }
-            println!("AS path : {:?}", res.as_path);
-            println!("IXPs    : {:?}", res.ixps);
+            app.log_line(format!("AS path : {:?}", res.as_path));
+            app.log_line(format!("IXPs    : {:?}", res.ixps));
         }
-        Err(e) => eprintln!("Erreur SIGINT Traceroute: {}", e),
+        Err(e) => app.log_line(format!("Erreur SIGINT Traceroute: {}", e)),
     }
 }
