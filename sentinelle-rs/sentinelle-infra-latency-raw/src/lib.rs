@@ -258,6 +258,29 @@ impl SigintTcpPort for TcpSigintEngine {
         if target.is_unspecified() {
             return Err(TcpSigintError::InvalidTarget(target.to_string()));
         }
+
+        // Collecte de plusieurs réponses (séquentielles) pour estimer le clock skew via timestamps TCP
+        let mut samples: Vec<(f64, u32)> = Vec::new();
+        let mut last_fp: Option<TcpFingerprint> = None;
+
+        for _ in 0..4 {
+            let (mut tx, rx) = self.open_tcp_channel()?;
+            let t0 = Instant::now();
+            self.send_syn(&mut tx, target, port)?;
+            if let Some(fp) = self.recv_synack(rx, target, port) {
+                let t = t0.elapsed().as_secs_f64();
+                if let Some(ts) = fp.ts_val {
+                    samples.push((t, ts));
+                }
+                last_fp = Some(fp);
+            }
+        }
+
+        let clock_skew = if samples.len() >= 2 {pPort for TcpSigintEngine {
+    fn probe(&self, target: IpAddr, port: u16) -> Result<TcpSigintResult, TcpSigintError> {
+        if target.is_unspecified() {
+            return Err(TcpSigintError::InvalidTarget(target.to_string()));
+        }
         let (mut tx, rx) = self.open_tcp_channel()?;
 
         // Collecte de plusieurs réponses pour estimer le clock skew via timestamps TCP
