@@ -25,6 +25,15 @@ use sentinelle_infra_osint_social::SocialOsintEngine;
 use std::io;
 use std::net::IpAddr;
 
+const BANNER: &[&str] = &[
+    "  ███████╗███████╗███╗   ██╗████████╗██╗███╗   ██╗██╗     ███████╗",
+    "  ██╔════╝██╔════╝████╗  ██║╚══██╔══╝██║████╗  ██║██║     ██╔════╝",
+    "  ███████╗█████╗  ██╔██╗ ██║   ██║   ██║██╔██╗ ██║██║     █████╗  ",
+    "  ╚════██║██╔══╝  ██║╚██╗██║   ██║   ██║██║╚██╗██║██║     ██╔══╝  ",
+    "  ███████║███████╗██║ ╚████║   ██║   ██║██║ ╚████║███████╗███████╗",
+    "  ╚══════╝╚══════╝╚═╝  ╚═══╝   ╚═╝   ╚═╝╚═╝  ╚═══╝╚══════╝╚══════╝",
+];
+
 enum View {
     MainMenu,
     IpInput,
@@ -106,15 +115,22 @@ fn ui<B: ratatui::backend::Backend>(f: &mut ratatui::Frame<B>, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
+            Constraint::Length(BANNER.len() as u16 + 1),
             Constraint::Length(3),
             Constraint::Min(5),
         ])
         .split(f.size());
 
-    // Header
-    let header = Paragraph::new("SENTINELLE TUI - OSINT / SIGINT")
-        .style(Style::default().add_modifier(Modifier::BOLD));
+    // Header ASCII
+    let banner_lines: Vec<Spans> = BANNER
+        .iter()
+        .map(|line| Spans::from(Span::styled(
+            *line,
+            Style::default().add_modifier(Modifier::BOLD),
+        )))
+        .collect();
+    let header = Paragraph::new(banner_lines)
+        .block(Block::default().borders(Borders::ALL).title("SENTINELLE OSINT / SIGINT"));
     f.render_widget(header, chunks[0]);
 
     // Menu or input prompt
