@@ -42,6 +42,7 @@ enum View {
     SigintTcpInput,
     SigintIcmpInput,
     SigintTracerouteInput,
+    ProfileInput,
 }
 
 struct App {
@@ -117,7 +118,8 @@ fn ui<B: ratatui::backend::Backend>(f: &mut ratatui::Frame<B>, app: &App) {
         .constraints([
             Constraint::Length(BANNER.len() as u16 + 1),
             Constraint::Length(3),
-            Constraint::Min(5),
+            Constraint::Min(3),
+            Constraint::Length(1),
         ])
         .split(f.size());
 
@@ -143,6 +145,7 @@ fn ui<B: ratatui::backend::Backend>(f: &mut ratatui::Frame<B>, app: &App) {
                 "SIGINT TCP",
                 "SIGINT ICMP",
                 "SIGINT Traceroute",
+                "Profil complet IP",
                 "Quitter",
             ];
             let list_items: Vec<ListItem> = items
@@ -171,6 +174,7 @@ fn ui<B: ratatui::backend::Backend>(f: &mut ratatui::Frame<B>, app: &App) {
                 View::SigintTcpInput => "IP:port pour SIGINT TCP (ex: 1.2.3.4:443): ",
                 View::SigintIcmpInput => "IP cible (SIGINT ICMP): ",
                 View::SigintTracerouteInput => "IP cible (SIGINT Traceroute): ",
+                View::ProfileInput => "IP cible (Profil complet): ",
                 View::MainMenu => "",
             };
             let input = Paragraph::new(app.input.as_str())
@@ -192,6 +196,11 @@ fn ui<B: ratatui::backend::Backend>(f: &mut ratatui::Frame<B>, app: &App) {
     let log_widget = Paragraph::new(log_lines)
         .block(Block::default().borders(Borders::ALL).title("Output"));
     f.render_widget(log_widget, chunks[2]);
+
+    // Status bar
+    let status = Paragraph::new("Esc: retour / q: quitter")
+        .style(Style::default().add_modifier(Modifier::DIM));
+    f.render_widget(status, chunks[3]);
 }
 
 fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, io::Error> {
@@ -204,7 +213,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, io::Error> {
                 }
             }
             KeyCode::Down => {
-                if app.selected_menu < 6 {
+                if app.selected_menu < 7 {
                     app.selected_menu += 1;
                 }
             }
@@ -218,7 +227,8 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, io::Error> {
                     3 => app.view = View::SigintTcpInput,
                     4 => app.view = View::SigintIcmpInput,
                     5 => app.view = View::SigintTracerouteInput,
-                    6 => return Ok(false),
+                    6 => app.view = View::ProfileInput,
+                    7 => return Ok(false),
                     _ => {}
                 }
             }
@@ -239,6 +249,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, io::Error> {
                     View::SigintTcpInput => run_sigint_tcp(app, &input),
                     View::SigintIcmpInput => run_sigint_icmp(app, &input),
                     View::SigintTracerouteInput => run_sigint_traceroute(app, &input),
+                    View::ProfileInput => run_profile(app, &input),
                     View::MainMenu => {}
                 }
                 app.view = View::MainMenu;
@@ -454,4 +465,53 @@ fn run_sigint_traceroute(app: &mut App, input: &str) {
         }
         Err(e) => app.log_line(format!("Erreur SIGINT Traceroute: {}", e)),
     }
+}
+
+fn run_profile(app: &mut App, input: &str) {
+    let ip: IpAddr = match input.parse() {
+        Ok(ip) => ip,
+        Err(_) => {
+            app.log_line(format!("Adresse IP invalide: {}", input));
+            return;
+        }
+    };
+
+    app.log_line(format!("=== Profil complet pour {} ===", ip));
+
+    // IP Intelligence
+    let http = reqwest::Client::new();
+    let metrics = InMemoryMetrics::default();
+    let ip_engine = CompositeIpIntelligence::new(http, metrics);
+    let ip_usecase = RunIpIntelligence::new(&ip_engine);
+    match ip_usecase.execute(ip) {
+        Ok(intel) => {
+            app.log_line(format!("IP Intel: {:?}", intel));
+        }
+        Err(e) => app.log_line(format!("IP Intel erreur: {}", e)),
+    }
+
+    // SIGINT TCP (port 443)
+    let tcp_engine = TcpSigintEngine::new();
+    let tcp_usecase = RunSigintTcp::new(&tcp_engine);
+    match tcp_usecase.execute(ip, 443) {
+        Ok(res) => {
+            app.log_line(format!("SIGINT TCP 443: {:?}", res));
+        }
+        Err(e) => app.log_line(format!("SIGINT TCP erreur: {}", e)),
+    }
+
+    // SIGINT ICMP
+    let icmp_engine = IcmpSigintEngine::new();
+    let icmp_usecase = RunSigintIcmp::new(&icmp_engine);
+    match icmp_usecase.execute(ip) {
+        Ok(res) => {
+            app.log_line(format!("SIGINT ICMP: {:?}", res));
+        }
+        Err(e) => app.log_line(format!("SIGINT ICMP erreur: {}", e)),
+    }
+
+    // Traceroute
+    run_sigint_traceroute(app, input);
+
+    app.log_line(format!("=== Fin du profil pour {} ===", ip));
 }
