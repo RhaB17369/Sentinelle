@@ -20,15 +20,4 @@ ratatui = "0.26"
 dns-lookup = "1.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-chrono = { version = "0.4", default-features = false, features = ["clock"] }ackage]
-name = "sentinelle-interface-cli"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-sentinelle-domain = { path = "../sentinelle-domain" }
-sentinelle-application = { path = "../sentinelle-application" }
-sentinelle-infra-osint-ip = { path = "../sentinelle-infra-osint-ip" }
-sentinelle-infra-osint-mail = { path = "../sentinelle-infra-osint-mail" }
-sentinelle-infra-osint-social = { path = "../sentinelle-infra-osint-social" }
-sentinelle-infra-metrics = { path = "../sentinelle-infra-metrics" }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
