@@ -8,6 +8,8 @@ members = [
     "sentinelle-infra-osint-social",
     "sentinelle-infra-email-recon",
     "sentinelle-infra-domain-intel",
+    "sentinelle-infra-latency-intel",
+    "sentinelle-infra-phone-intel",
     "sentinelle-infra-cache-sqlite",
     "sentinelle-infra-metrics",
     "sentinelle-interface-cli",

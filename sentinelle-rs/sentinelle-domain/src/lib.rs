@@ -10,6 +10,7 @@ pub mod monitoring;
 pub mod email_recon;
 pub mod domain_intel;
 pub mod latency_intel;
+pub mod phone_intel;
 
 pub use shared::{Email, EmailError};
 pub use intel::{
@@ -32,4 +33,7 @@ pub use domain_intel::{
 pub use latency_intel::{
     LatencyIntelligencePort, LatencyIntel, LatencyIntelError,
     RttStats, LinkQuality, AsnInfo, TracerouteHop, TraceroutePath,
+};
+pub use phone_intel::{
+    PhoneNumber, PhoneError, PhoneIntel, PhoneIntelError, PhoneIntelligencePort, GpsLocation,
 };
