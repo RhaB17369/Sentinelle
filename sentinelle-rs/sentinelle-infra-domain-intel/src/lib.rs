@@ -105,20 +105,62 @@ impl DomainIntelEngine {
     }
 
     async fn run_ssl(&self, domain: &str) -> Option<SslData> {
-        // On utilise ici l'endpoint SSL Labs-like via HTTPS (pas de raw TLS bas niveau).
-        // Ce bloc peut être remplacé par une inspection TLS native si nécessaire.
-        let url = format!("https://{domain}");
-        let resp = self.http.get(&url).send().await.ok()?;
-        if !resp.url().scheme().eq_ignore_ascii_case("https") {
-            return None;
+        use rustls::{ClientConfig, RootCertStore};
+        use std::sync::Arc;
+        use tokio::net::TcpStream;
+        use tokio_rustls::TlsConnector;
+        use tokio_rustls::rustls::pki_types::ServerName;
+        use webpki_roots::TLS_SERVER_ROOTS;
+        use x509_parser::prelude::*;
+
+        // Construire une config TLS avec les racines publiques (webpki-roots)
+        let mut root_store = RootCertStore::empty();
+        root_store.add_trust_anchors(TLS_SERVER_ROOTS.iter().map(|ta| ta.to_trust_anchor()));
+
+        let config = ClientConfig::builder()
+            .with_root_certificates(root_store)
+            .with_no_client_auth();
+
+        let connector = TlsConnector::from(Arc::new(config));
+
+        let addr = format!("{domain}:443");
+        let tcp = TcpStream::connect(addr).await.ok()?;
+
+        let server_name = ServerName::try_from(domain.to_string()).ok()?;
+        let mut tls = connector.connect(server_name, tcp).await.ok()?;
+
+        // Récupérer les certificats du pair
+        let peer_certs = tls
+            .get_ref()
+            .1
+            .peer_certificates()
+            .to_vec();
+
+        let first = peer_certs.first()?;
+
+        // Parser le certificat en DER avec x509-parser
+        let (_, x509) = X509Certificate::from_der(first.as_ref()).ok()?;
+
+        let mut subject = HashMap::new();
+        if let Some(cn) = x509.subject().iter_common_name().next() {
+            if let Ok(cn_str) = cn.as_str() {
+                subject.insert("commonName".to_string(), cn_str.to_string());
+            }
         }
 
-        // Les certificats ne sont pas exposés directement par reqwest; on laisse ce bloc
-        // comme placeholder structurel, à implémenter avec un client TLS bas niveau si besoin.
+        let mut issuer = HashMap::new();
+        if let Some(cn) = x509.issuer().iter_common_name().next() {
+            if let Ok(cn_str) = cn.as_str() {
+                issuer.insert("commonName".to_string(), cn_str.to_string());
+            }
+        }
+
+        let not_after = x509.validity().not_after.to_rfc2822().ok();
+
         Some(SslData {
-            subject: HashMap::new(),
-            issuer: HashMap::new(),
-            not_after: None,
+            subject,
+            issuer,
+            not_after,
         })
     }
 
