@@ -151,19 +151,19 @@ fn main_loop<B: ratatui::backend::Backend>(
     Ok(())
 }
 
-fn ui<B: ratatui::backend::Backend>(f: &mut ratatui::Frame<B>, app: &App) {
-    let chunks = Layout::default()
+fn ui&lt;B: ratatui::backend::Backend&gt;(f: &amp;mut ratatui::Frame&lt;B&gt;, app: &amp;App) {
+    // Layout global: header, zone principale, barre de statut
+    let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(BANNER.len() as u16 + 1),
-            Constraint::Length(3),
-            Constraint::Min(3),
+            Constraint::Min(5),
             Constraint::Length(1),
         ])
         .split(f.size());
 
     // Header ASCII
-    let banner_lines: Vec<Spans> = BANNER
+    let banner_lines: Vec&lt;Spans&gt; = BANNER
         .iter()
         .map(|line| Spans::from(Span::styled(
             *line,
@@ -172,76 +172,86 @@ fn ui<B: ratatui::backend::Backend>(f: &mut ratatui::Frame<B>, app: &App) {
         .collect();
     let header = Paragraph::new(banner_lines)
         .block(Block::default().borders(Borders::ALL).title("SENTINELLE OSINT / SIGINT"));
-    f.render_widget(header, chunks[0]);
+    f.render_widget(header, outer[0]);
 
-    // Menu or input prompt
-    match app.view {
-        View::MainMenu => {
-            let items = vec![
-                "IP Intelligence",
-                "Mail OSINT",
-                "Social OSINT",
-                "SIGINT TCP",
-                "SIGINT ICMP",
-                "SIGINT Traceroute",
-                "Profil complet IP",
-                "Profil complet Email",
-                "Quitter",
-            ];
-            let list_items: Vec<ListItem> = items
-                .iter()
-                .enumerate()
-                .map(|(i, item)| {
-                    if i == app.selected_menu {
-                        ListItem::new(Spans::from(Span::styled(
-                            *item,
-                            Style::default().add_modifier(Modifier::REVERSED),
-                        )))
-                    } else {
-                        ListItem::new(Spans::from(Span::raw(*item)))
-                    }
-                })
-                .collect();
-            let menu = List::new(list_items)
-                .block(Block::default().borders(Borders::ALL).title("Menu"));
-            f.render_widget(menu, chunks[1]);
-        }
-        _ => {
-            let prompt = match app.view {
-                View::IpInput => "IP cible (IP Intel): ",
-                View::MailInput => "Email cible: ",
-                View::SocialInput => "Username cible: ",
-                View::SigintTcpInput => "IP:port pour SIGINT TCP (ex: 1.2.3.4:443): ",
-                View::SigintIcmpInput => "IP cible (SIGINT ICMP): ",
-                View::SigintTracerouteInput => "IP cible (SIGINT Traceroute): ",
-                View::ProfileIpInput => "IP cible (Profil complet IP): ",
-                View::ProfileEmailInput => "Email cible (Profil complet Email): ",
-                View::MainMenu => "",
-            };
-            let input = Paragraph::new(app.input.as_str())
-                .block(Block::default().borders(Borders::ALL).title(prompt));
-            f.render_widget(input, chunks[1]);
-        }
+    // Zone principale: à la bpytop, panneau gauche (menu) + panneau droit (input + output)
+    let main_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
+        .split(outer[1]);
+
+    // Panneau gauche: menu
+    {
+        let items = vec![
+            "IP Intelligence",
+            "Mail OSINT",
+            "Social OSINT",
+            "SIGINT TCP",
+            "SIGINT ICMP",
+            "SIGINT Traceroute",
+            "Profil complet IP",
+            "Profil complet Email",
+            "Quitter",
+        ];
+        let list_items: Vec&lt;ListItem&gt; = items
+            .iter()
+            .enumerate()
+            .map(|(i, item)| {
+                if i == app.selected_menu {
+                    ListItem::new(Spans::from(Span::styled(
+                        *item,
+                        Style::default().add_modifier(Modifier::REVERSED),
+                    )))
+                } else {
+                    ListItem::new(Spans::from(Span::raw(*item)))
+                }
+            })
+            .collect();
+        let menu = List::new(list_items)
+            .block(Block::default().borders(Borders::ALL).title("Modules"));
+        f.render_widget(menu, main_chunks[0]);
     }
 
-    // Log / output pane
-    let log_lines: Vec<Spans> = app
+    // Panneau droit: input en haut, output en bas
+    let right_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(3)])
+        .split(main_chunks[1]);
+
+    // Input / cible courante
+    let prompt = match app.view {
+        View::IpInput =&gt; "IP cible (IP Intel): ",
+        View::MailInput =&gt; "Email cible: ",
+        View::SocialInput =&gt; "Username cible: ",
+        View::SigintTcpInput =&gt; "IP:port pour SIGINT TCP (ex: 1.2.3.4:443): ",
+        View::SigintIcmpInput =&gt; "IP cible (SIGINT ICMP): ",
+        View::SigintTracerouteInput =&gt; "IP cible (SIGINT Traceroute): ",
+        View::ProfileIpInput =&gt; "IP cible (Profil complet IP): ",
+        View::ProfileEmailInput =&gt; "Email cible (Profil complet Email): ",
+        View::MainMenu =&gt; "Sélectionnez un module et appuyez sur Entrée",
+    };
+    let input = Paragraph::new(app.input.as_str())
+        .block(Block::default().borders(Borders::ALL).title(prompt));
+    f.render_widget(input, right_chunks[0]);
+
+    // Log / output pane (tableau dynamique de lignes)
+    let log_lines: Vec&lt;Spans&gt; = app
         .log
         .iter()
         .rev()
-        .take((chunks[2].height as usize).saturating_sub(2))
+        .take((right_chunks[1].height as usize).saturating_sub(2))
         .rev()
         .map(|l| Spans::from(Span::raw(l.as_str())))
         .collect();
 
     let log_widget = Paragraph::new(log_lines)
         .block(Block::default().borders(Borders::ALL).title("Output"));
-    f.render_widget(log_widget, chunks[2]);
+    f.render_widget(log_widget, right_chunks[1]);
 
     // Status bar
     let status = Paragraph::new("Esc: retour / q: quitter")
         .style(Style::default().add_modifier(Modifier::DIM));
-    f.render_widget(status, chunks[3]);
+    f.render_widget(status, outer[2]);
 }
 
 fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, io::Error> {
