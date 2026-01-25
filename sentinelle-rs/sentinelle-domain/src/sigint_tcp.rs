@@ -22,6 +22,7 @@ pub struct TcpSigintResult {
     pub port: u16,
     pub fingerprint: Option<TcpFingerprint>,
     pub clock_skew: Option<ClockSkew>,
+    pub os_guess: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]

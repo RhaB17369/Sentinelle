@@ -298,11 +298,29 @@ impl SigintTcpPort for TcpSigintEngine {
             None
         };
 
+        // OS guess simple basé sur taille fenêtre + options + TTL
+        let os_guess = last_fp.as_ref().and_then(|fp| {
+            if fp.options.contains(&"TS".to_string()) && fp.wscale.is_some() {
+                if fp.window_size == 65535 {
+                    Some("Linux/Modern".to_string())
+                } else if fp.window_size == 8192 {
+                    Some("Windows/Legacy".to_string())
+                } else {
+                    Some("Unknown/Generic".to_string())
+                }
+            } else if fp.window_size == 65535 {
+                Some("Windows/Generic".to_string())
+            } else {
+                None
+            }
+        });
+
         Ok(TcpSigintResult {
             target,
             port,
             fingerprint: last_fp,
             clock_skew,
+            os_guess,
         })
     }
 }
@@ -458,7 +476,8 @@ impl TracerouteSigintEngine {
         if parts.len() &gt;= 3 {
             let asn = parts[0].to_string();
             let country = parts[2].to_string();
-            return Some((asn, country));
+            let owner = if parts.len() &gt;= 6 { Some(parts[5].to_string()) } else { None };
+            return Some((asn, country, owner));
         }
         None
     }
@@ -502,12 +521,12 @@ impl SigintTraceroutePort for TracerouteSigintEngine {
                 .captures(line)
                 .and_then(|c| c[1].parse::<f64>().ok());
 
-            let (asn, country) = match self.lookup_asn(&ip) {
-                Some((a, c)) => {
+            let (asn, country, owner) = match self.lookup_asn(&ip) {
+                Some((a, c, o)) => {
                     as_path.push(a.clone());
-                    (Some(a), Some(c))
+                    (Some(a), Some(c), o)
                 }
-                None => (None, None),
+                None => (None, None, None),
             };
 
             hops.push(TracerouteHopDetail {
@@ -515,7 +534,7 @@ impl SigintTraceroutePort for TracerouteSigintEngine {
                 ip,
                 rtt_ms,
                 asn,
-                owner: None,
+                owner,
                 country,
             });
             hop_index = hop_index.saturating_add(1);
@@ -529,11 +548,29 @@ impl SigintTraceroutePort for TracerouteSigintEngine {
             }
         }
 
+        // Détection très simple d'IXP à partir des noms d'AS
+        let mut ixps = Vec::new();
+        for hop in &hops {
+            if let Some(ref o) = hop.owner {
+                let lower = o.to_lowercase();
+                if lower.contains("ixp")
+                    || lower.contains("internet exchange")
+                    || lower.contains("ams-ix")
+                    || lower.contains("decix")
+                    || lower.contains("linx")
+                {
+                    ixps.push(o.clone());
+                }
+            }
+        }
+        ixps.sort();
+        ixps.dedup();
+
         Ok(NetworkPathIntel {
             target,
             hops,
             as_path: dedup_as_path,
-            ixps: Vec::new(), // IXP à remplir via patterns spécifiques si nécessaire
+            ixps,
         })
     }
 }
