@@ -9,6 +9,7 @@ members = [
     "sentinelle-infra-email-recon",
     "sentinelle-infra-domain-intel",
     "sentinelle-infra-latency-intel",
+    "sentinelle-infra-latency-raw",
     "sentinelle-infra-phone-intel",
     "sentinelle-infra-cache-sqlite",
     "sentinelle-infra-metrics",
