@@ -7,17 +7,17 @@ use std::time::Duration;
 
 #[derive(Debug, Default)]
 pub struct InMemoryMetrics {
-    inner: Mutex&lt;Inner&gt;,
+    inner: Mutex<Inner>,
 }
 
 #[derive(Debug, Default)]
 struct Inner {
-    latencies: HashMap&lt;String, Vec&lt;Duration&gt;&gt;,
-    successes: HashMap&lt;String, u64&gt;,
+    latencies: HashMap<String, Vec<Duration>>,
+    successes: HashMap<String, u64>,
 }
 
 impl MetricsPort for InMemoryMetrics {
-    fn observe_provider(&self, provider: &amp;str, latency: Duration, success: bool) {
+    fn observe_provider(&self, provider: &str, latency: Duration, success: bool) {
         let mut guard = self.inner.lock();
         guard
             .latencies
@@ -31,7 +31,7 @@ impl MetricsPort for InMemoryMetrics {
 }
 
 impl InMemoryMetrics {
-    pub fn snapshot(&self) -&gt; (HashMap&lt;String, Vec&lt;Duration&gt;&gt;, HashMap&lt;String, u64&gt;) {
+    pub fn snapshot(&self) -> (HashMap<String, Vec<Duration>>, HashMap<String, u64>) {
         let guard = self.inner.lock();
         (guard.latencies.clone(), guard.successes.clone())
     }

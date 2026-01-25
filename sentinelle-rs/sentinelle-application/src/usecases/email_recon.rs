@@ -1,4 +1,4 @@
-use sentinelle_domain::{EmailReconPort, EmailReconResult, EmailReconError, Email};
+use sentinelle_domain::{email_recon::EmailReconError, EmailReconPort, EmailReconResult, Email};
 
 pub struct RunEmailRecon<'a> {
     port: &'a dyn EmailReconPort,
