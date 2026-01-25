@@ -61,23 +61,40 @@ enum View {
 
 #[derive(Serialize, Deserialize)]
 struct CachedLog {
-    lines: Vec<String>,
+    lines: Vec&lt;String&gt;,
+}
+
+struct ReportIp {
+    headers: Vec&lt;String&gt;,
+    rows: Vec&lt;Vec&lt;String&gt;&gt;,
+}
+
+struct ReportEmail {
+    headers: Vec&lt;String&gt;,
+    rows: Vec&lt;Vec&lt;String&gt;&gt;,
+}
+
+enum ReportKind {
+    None,
+    Ip(ReportIp),
+    Email(ReportEmail),
 }
 
 struct App {
     view: View,
     input: String,
-    log: Vec<String>,
+    log: Vec&lt;String&gt;,
     selected_menu: usize,
     cache: SqliteCache,
-    activity: Vec<ActivityEvent>,
+    activity: Vec&lt;ActivityEvent&gt;,
     output_scroll: usize,
     activity_scroll: usize,
+    report: ReportKind,
 }
 
 impl App {
     fn new() -> Self {
-        let cache = SqliteCache::new("sentinelle_cache.db").unwrap_or_else(|_| {
+        let cache = SqliteCache::new("sentinelle_cache.db").unwrap_or_else(|| {
             SqliteCache::new(":memory:").expect("cache sqlite")
         });
 
@@ -92,6 +109,7 @@ impl App {
             activity,
             output_scroll: 0,
             activity_scroll: 0,
+            report: ReportKind::None,
         }
     }
 
@@ -268,24 +286,110 @@ fn ui<B: ratatui::backend::Backend>(f: &mut ratatui::Frame<B>, app: &App) {
         .block(Block::default().borders(Borders::ALL).title(prompt));
     f.render_widget(input, right_chunks[0]);
 
-    // Output pane avec scroll
-    let visible_output_lines = (right_chunks[1].height as usize).saturating_sub(2);
-    let total_output_lines = app.log.len();
-    let max_output_scroll = total_output_lines.saturating_sub(visible_output_lines);
-    let output_scroll = app.output_scroll.min(max_output_scroll);
-    let start = total_output_lines.saturating_sub(visible_output_lines + output_scroll);
-    let end = total_output_lines.saturating_sub(output_scroll);
-    let log_lines: Vec<Spans> = app
-        .log
-        .iter()
-        .skip(start)
-        .take(end.saturating_sub(start))
-        .map(|l| Spans::from(Span::raw(l.as_str())))
-        .collect();
+    // Output pane: table pour rapports structurés, sinon lignes texte avec scroll
+    match &app.report {
+        ReportKind::Ip(report) | ReportKind::Email(ReportIp { headers: report_headers, rows: report_rows }) => {
+            // Ce bras ne sera pas utilisé correctement pour Email, on gère Email séparément ci-dessous.
+            let _ = (report_headers, report_rows); // évite warning
+        }
+        _ => {}
+    }
 
-    let log_widget = Paragraph::new(log_lines)
-        .block(Block::default().borders(Borders::ALL).title("Output"));
-    f.render_widget(log_widget, right_chunks[1]);
+    match &app.report {
+        ReportKind::Ip(report) => {
+            let visible_rows = (right_chunks[1].height as usize).saturating_sub(3);
+            let total_rows = report.rows.len();
+            let max_scroll = total_rows.saturating_sub(visible_rows);
+            let scroll = app.output_scroll.min(max_scroll);
+            let start = total_rows.saturating_sub(visible_rows + scroll);
+            let end = total_rows.saturating_sub(scroll);
+
+            let header = Row::new(
+                report
+                    .headers
+                    .iter()
+                    .map(|h| Span::styled(h.clone(), Style::default().add_modifier(Modifier::BOLD)))
+                    .collect::<Vec<_>>(),
+            );
+
+            let rows: Vec<Row> = report
+                .rows
+                .iter()
+                .skip(start)
+                .take(end.saturating_sub(start))
+                .map(|cols| {
+                    Row::new(cols.iter().map(|c| Span::raw(c.clone())).collect::<Vec<_>>())
+                })
+                .collect();
+
+            let table = Table::new(rows)
+                .header(header)
+                .block(Block::default().borders(Borders::ALL).title("Output"))
+                .widths(&[
+                    Constraint::Length(14),
+                    Constraint::Length(16),
+                    Constraint::Min(10),
+                    Constraint::Min(10),
+                ]);
+            f.render_widget(table, right_chunks[1]);
+        }
+        ReportKind::Email(report) => {
+            let visible_rows = (right_chunks[1].height as usize).saturating_sub(3);
+            let total_rows = report.rows.len();
+            let max_scroll = total_rows.saturating_sub(visible_rows);
+            let scroll = app.output_scroll.min(max_scroll);
+            let start = total_rows.saturating_sub(visible_rows + scroll);
+            let end = total_rows.saturating_sub(scroll);
+
+            let header = Row::new(
+                report
+                    .headers
+                    .iter()
+                    .map(|h| Span::styled(h.clone(), Style::default().add_modifier(Modifier::BOLD)))
+                    .collect::<Vec<_>>(),
+            );
+
+            let rows: Vec<Row> = report
+                .rows
+                .iter()
+                .skip(start)
+                .take(end.saturating_sub(start))
+                .map(|cols| {
+                    Row::new(cols.iter().map(|c| Span::raw(c.clone())).collect::<Vec<_>>())
+                })
+                .collect();
+
+            let table = Table::new(rows)
+                .header(header)
+                .block(Block::default().borders(Borders::ALL).title("Output"))
+                .widths(&[
+                    Constraint::Length(14),
+                    Constraint::Length(16),
+                    Constraint::Min(10),
+                    Constraint::Min(10),
+                ]);
+            f.render_widget(table, right_chunks[1]);
+        }
+        ReportKind::None => {
+            let visible_output_lines = (right_chunks[1].height as usize).saturating_sub(2);
+            let total_output_lines = app.log.len();
+            let max_output_scroll = total_output_lines.saturating_sub(visible_output_lines);
+            let output_scroll = app.output_scroll.min(max_output_scroll);
+            let start = total_output_lines.saturating_sub(visible_output_lines + output_scroll);
+            let end = total_output_lines.saturating_sub(output_scroll);
+            let log_lines: Vec<Spans> = app
+                .log
+                .iter()
+                .skip(start)
+                .take(end.saturating_sub(start))
+                .map(|l| Spans::from(Span::raw(l.as_str())))
+                .collect();
+
+            let log_widget = Paragraph::new(log_lines)
+                .block(Block::default().borders(Borders::ALL).title("Output"));
+            f.render_widget(log_widget, right_chunks[1]);
+        }
+    }
 
     // Activity pane avec scroll et rendu tabulaire
     let visible_activity_lines = (right_chunks[2].height as usize).saturating_sub(3); // header + bordures
@@ -653,11 +757,21 @@ fn run_profile_ip(app: &mut App, input: &str) {
     let cache_key = format!("profile_ip:{}", ip);
     if app.cache_load(&cache_key) {
         app.log_line(format!("(cache) Profil déjà calculé pour {}", ip));
+        app.report = ReportKind::None;
         return;
     }
 
     app.log.clear();
+    app.report = ReportKind::None;
     app.log_line(format!("=== Profil complet pour {} ===", ip));
+
+    let mut headers = vec![
+        "Section".to_string(),
+        "Clé".to_string(),
+        "Valeur".to_string(),
+        "Détail".to_string(),
+    ];
+    let mut rows = Vec::new();
 
     // IP Intelligence
     let http = reqwest::Client::new();
@@ -667,8 +781,46 @@ fn run_profile_ip(app: &mut App, input: &str) {
     match ip_usecase.execute(ip) {
         Ok(intel) => {
             app.log_line(format!("IP Intel: {:?}", intel));
+            rows.push(vec![
+                "IP".to_string(),
+                "Adresse".to_string(),
+                intel.ip.to_string(),
+                "".to_string(),
+            ]);
+            if let Some(country) = intel.country {
+                rows.push(vec![
+                    "IP".to_string(),
+                    "Pays".to_string(),
+                    country,
+                    "".to_string(),
+                ]);
+            }
+            if let Some(city) = intel.city {
+                rows.push(vec![
+                    "IP".to_string(),
+                    "Ville".to_string(),
+                    city,
+                    "".to_string(),
+                ]);
+            }
+            if let Some(isp) = intel.isp {
+                rows.push(vec![
+                    "IP".to_string(),
+                    "ISP".to_string(),
+                    isp,
+                    "".to_string(),
+                ]);
+            }
         }
-        Err(e) => app.log_line(format!("IP Intel erreur: {}", e)),
+        Err(e) => {
+            app.log_line(format!("IP Intel erreur: {}", e));
+            rows.push(vec![
+                "IP".to_string(),
+                "Erreur".to_string(),
+                e.to_string(),
+                "".to_string(),
+            ]);
+        }
     }
 
     // Domain Intelligence via reverse DNS si possible
@@ -678,8 +830,40 @@ fn run_profile_ip(app: &mut App, input: &str) {
         match domain_usecase.execute(&host) {
             Ok(dintel) => {
                 app.log_line(format!("DomainIntel pour {}: {:?}", host, dintel));
+                rows.push(vec![
+                    "Domain".to_string(),
+                    "Host".to_string(),
+                    host.clone(),
+                    "".to_string(),
+                ]);
+                if let Some(whois) = dintel.whois {
+                    if let Some(reg) = whois.registrar {
+                        rows.push(vec![
+                            "Domain".to_string(),
+                            "Registrar".to_string(),
+                            reg,
+                            "".to_string(),
+                        ]);
+                    }
+                    if let Some(c) = whois.country {
+                        rows.push(vec![
+                            "Domain".to_string(),
+                            "Pays".to_string(),
+                            c,
+                            "".to_string(),
+                        ]);
+                    }
+                }
             }
-            Err(e) => app.log_line(format!("DomainIntel erreur pour {}: {}", host, e)),
+            Err(e) => {
+                app.log_line(format!("DomainIntel erreur pour {}: {}", host, e));
+                rows.push(vec![
+                    "Domain".to_string(),
+                    "Erreur".to_string(),
+                    e.to_string(),
+                    host,
+                ]);
+            }
         }
     }
 
@@ -689,8 +873,32 @@ fn run_profile_ip(app: &mut App, input: &str) {
     match tcp_usecase.execute(ip, 443) {
         Ok(res) => {
             app.log_line(format!("SIGINT TCP 443: {:?}", res));
+            if let Some(fp) = res.fingerprint {
+                rows.push(vec![
+                    "SIGINT TCP".to_string(),
+                    "Window".to_string(),
+                    fp.window_size.to_string(),
+                    format!("{:?}", fp.options),
+                ]);
+                if let Some(os) = res.os_guess {
+                    rows.push(vec![
+                        "SIGINT TCP".to_string(),
+                        "OS".to_string(),
+                        os,
+                        "".to_string(),
+                    ]);
+                }
+            }
         }
-        Err(e) => app.log_line(format!("SIGINT TCP erreur: {}", e)),
+        Err(e) => {
+            app.log_line(format!("SIGINT TCP erreur: {}", e));
+            rows.push(vec![
+                "SIGINT TCP".to_string(),
+                "Erreur".to_string(),
+                e.to_string(),
+                "".to_string(),
+            ]);
+        }
     }
 
     // SIGINT ICMP
@@ -699,15 +907,55 @@ fn run_profile_ip(app: &mut App, input: &str) {
     match icmp_usecase.execute(ip) {
         Ok(res) => {
             app.log_line(format!("SIGINT ICMP: {:?}", res));
+            if let Some(series) = res.ip_id_series {
+                rows.push(vec![
+                    "SIGINT ICMP".to_string(),
+                    "IP ID".to_string(),
+                    format!("{:?}", series.ids),
+                    series.classification,
+                ]);
+            }
         }
-        Err(e) => app.log_line(format!("SIGINT ICMP erreur: {}", e)),
+        Err(e) => {
+            app.log_line(format!("SIGINT ICMP erreur: {}", e));
+            rows.push(vec![
+                "SIGINT ICMP".to_string(),
+                "Erreur".to_string(),
+                e.to_string(),
+                "".to_string(),
+            ]);
+        }
     }
 
-    // Traceroute
-    run_sigint_traceroute(app, input);
+    // Traceroute (résumé)
+    let ip_str = ip.to_string();
+    let max_hops: u8 = 20;
+    let tr_engine = TracerouteSigintEngine::new();
+    let tr_usecase = RunSigintTraceroute::new(&tr_engine);
+    match tr_usecase.execute(ip, max_hops) {
+        Ok(res) => {
+            app.log_line(format!("SIGINT Traceroute pour {}: {:?}", res.target, res));
+            rows.push(vec![
+                "Traceroute".to_string(),
+                "Hops".to_string(),
+                res.hops.len().to_string(),
+                format!("AS path: {:?}", res.as_path),
+            ]);
+        }
+        Err(e) => {
+            app.log_line(format!("SIGINT Traceroute erreur: {}", e));
+            rows.push(vec![
+                "Traceroute".to_string(),
+                "Erreur".to_string(),
+                e.to_string(),
+                ip_str,
+            ]);
+        }
+    }
 
     app.log_line(format!("=== Fin du profil pour {} ===", ip));
 
+    app.report = ReportKind::Ip(ReportIp { headers, rows });
     app.cache_save(&cache_key);
 }
 
@@ -723,11 +971,21 @@ fn run_profile_email(app: &mut App, input: &str) {
     let cache_key = format!("profile_email:{}", email.as_str());
     if app.cache_load(&cache_key) {
         app.log_line(format!("(cache) Profil email déjà calculé pour {}", email.as_str()));
+        app.report = ReportKind::None;
         return;
     }
 
     app.log.clear();
+    app.report = ReportKind::None;
     app.log_line(format!("=== Profil complet Email pour {} ===", email.as_str()));
+
+    let mut headers = vec![
+        "Section".to_string(),
+        "Clé".to_string(),
+        "Valeur".to_string(),
+        "Détail".to_string(),
+    ];
+    let mut rows = Vec::new();
 
     // Mail OSINT (présence sur services)
     let mail_engine = MailOsintEngine::new_with_default_probes();
@@ -735,14 +993,28 @@ fn run_profile_email(app: &mut App, input: &str) {
     match mail_usecase.execute(email.clone()) {
         Ok(summary) => {
             app.log_line("Mail OSINT:");
-            for svc in summary.services {
+            for svc in &summary.services {
                 app.log_line(format!(
                     "  {:20} exists={} error={}",
                     svc.service_name, svc.exists, svc.error
                 ));
+                rows.push(vec![
+                    "Mail OSINT".to_string(),
+                    svc.service_name.clone(),
+                    svc.exists.to_string(),
+                    svc.error.clone(),
+                ]);
             }
         }
-        Err(e) => app.log_line(format!("Mail OSINT erreur: {}", e)),
+        Err(e) => {
+            app.log_line(format!("Mail OSINT erreur: {}", e));
+            rows.push(vec![
+                "Mail OSINT".to_string(),
+                "Erreur".to_string(),
+                e.to_string(),
+                "".to_string(),
+            ]);
+        }
     }
 
     // EmailRecon (DNS, CT logs, archives)
@@ -751,15 +1023,48 @@ fn run_profile_email(app: &mut App, input: &str) {
     match recon_usecase.execute(email.clone()) {
         Ok(res) => {
             app.log_line(format!("EmailRecon domaine {}:", res.domain));
+            rows.push(vec![
+                "EmailRecon".to_string(),
+                "Domaine".to_string(),
+                res.domain.clone(),
+                "".to_string(),
+            ]);
             if let Some(dns) = res.dns {
-                app.log_line(format!("  MX hosts      : {:?}", dns.mx_hosts));
-                app.log_line(format!("  Providers     : {:?}", dns.inferred_providers));
+                rows.push(vec![
+                    "EmailRecon".to_string(),
+                    "MX".to_string(),
+                    format!("{:?}", dns.mx_hosts),
+                    format!("{:?}", dns.inferred_providers),
+                ]);
             }
-            app.log_line(format!("  CT domains    : {} entrées", res.ct_domains.len()));
-            app.log_line(format!("  Wayback hits  : {}", res.archive_hits));
-            app.log_line(format!("  CCrawl hits   : {}", res.common_crawl_hits));
+            rows.push(vec![
+                "EmailRecon".to_string(),
+                "CT domains".to_string(),
+                res.ct_domains.len().to_string(),
+                "".to_string(),
+            ]);
+            rows.push(vec![
+                "EmailRecon".to_string(),
+                "Wayback hits".to_string(),
+                res.archive_hits.to_string(),
+                "".to_string(),
+            ]);
+            rows.push(vec![
+                "EmailRecon".to_string(),
+                "CCrawl hits".to_string(),
+                res.common_crawl_hits.to_string(),
+                "".to_string(),
+            ]);
         }
-        Err(e) => app.log_line(format!("EmailRecon erreur: {}", e)),
+        Err(e) => {
+            app.log_line(format!("EmailRecon erreur: {}", e));
+            rows.push(vec![
+                "EmailRecon".to_string(),
+                "Erreur".to_string(),
+                e.to_string(),
+                "".to_string(),
+            ]);
+        }
     }
 
     // Social OSINT (username/email sur les sites sociaux)
@@ -774,12 +1079,27 @@ fn run_profile_email(app: &mut App, input: &str) {
                     "  {:20} status={:?} url={:?}",
                     acc.site_name, acc.status, acc.profile_url
                 ));
+                rows.push(vec![
+                    "Social".to_string(),
+                    acc.site_name,
+                    format!("{:?}", acc.status),
+                    acc.profile_url.unwrap_or_default(),
+                ]);
             }
         }
-        Err(e) => app.log_line(format!("Social OSINT erreur: {}", e)),
+        Err(e) => {
+            app.log_line(format!("Social OSINT erreur: {}", e));
+            rows.push(vec![
+                "Social".to_string(),
+                "Erreur".to_string(),
+                e.to_string(),
+                "".to_string(),
+            ]);
+        }
     }
 
     app.log_line("=== Fin du profil Email ===");
 
+    app.report = ReportKind::Email(ReportEmail { headers, rows });
     app.cache_save(&cache_key);
 }
