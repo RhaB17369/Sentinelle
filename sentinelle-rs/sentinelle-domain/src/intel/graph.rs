@@ -63,6 +63,16 @@ impl IntelligenceGraph {
         self.entities.get(id)
     }
 
+    /// Itérateur en lecture seule sur les entités, utilisé par les adapters (graph export, etc.).
+    pub fn iter_entities(&self) -> impl Iterator<Item = &Entity> {
+        self.entities.values()
+    }
+
+    /// Itérateur en lecture seule sur les relations, utilisé par les adapters.
+    pub fn iter_relationships(&self) -> impl Iterator<Item = &Relationship> {
+        self.relationships.iter()
+    }
+
     pub fn related_entities(
         &self,
         start: &EntityId,
