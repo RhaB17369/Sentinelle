@@ -8,9 +8,9 @@ use crossterm::{
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Span, Spans},
-    widgets::{Block, Borders, List, ListItem, Paragraph},
+    widgets::{Block, Borders, List, ListItem, Paragraph, Row, Table},
     Terminal,
 };
 use sentinelle_application::usecases::{
@@ -36,6 +36,7 @@ use std::io;
 use std::net::IpAddr;
 use std::time::{SystemTime, UNIX_EPOCH, Instant};
 use serde::{Serialize, Deserialize};
+use chrono::{NaiveDateTime, Utc};
 
 const BANNER: &[&str] = &[
     "  ███████╗███████╗███╗   ██╗████████╗██╗███╗   ██╗██╗     ███████╗",
@@ -286,33 +287,56 @@ fn ui<B: ratatui::backend::Backend>(f: &mut ratatui::Frame<B>, app: &App) {
         .block(Block::default().borders(Borders::ALL).title("Output"));
     f.render_widget(log_widget, right_chunks[1]);
 
-    // Activity pane avec scroll
-    let visible_activity_lines = (right_chunks[2].height as usize).saturating_sub(2);
+    // Activity pane avec scroll et rendu tabulaire
+    let visible_activity_lines = (right_chunks[2].height as usize).saturating_sub(3); // header + bordures
     let total_activity_lines = app.activity.len();
     let max_activity_scroll = total_activity_lines.saturating_sub(visible_activity_lines);
     let activity_scroll = app.activity_scroll.min(max_activity_scroll);
     let a_start = total_activity_lines.saturating_sub(visible_activity_lines + activity_scroll);
     let a_end = total_activity_lines.saturating_sub(activity_scroll);
-    let activity_lines: Vec<Spans> = app
+
+    let header = Row::new(vec![
+        Span::styled("Time", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled("Module", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled("Target", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled("Dur(ms)", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled("Status", Style::default().add_modifier(Modifier::BOLD)),
+    ]);
+
+    let rows: Vec<Row> = app
         .activity
         .iter()
         .skip(a_start)
         .take(a_end.saturating_sub(a_start))
         .map(|ev| {
-            let line = format!(
-                "{} {} {} {}ms {}",
-                ev.ts,
-                ev.module,
-                ev.target,
-                ev.duration_ms,
-                ev.status
-            );
-            Spans::from(Span::raw(line))
+            let dt = NaiveDateTime::from_timestamp_opt(ev.ts as i64, 0)
+                .unwrap_or_else(|| NaiveDateTime::from_timestamp_opt(0, 0).unwrap());
+            let ts_str = dt.format("%Y-%m-%d %H:%M:%S").to_string();
+            let status_style = match ev.status.as_str() {
+                "done" => Style::default().fg(Color::Green),
+                "error" => Style::default().fg(Color::Red),
+                _ => Style::default().fg(Color::Yellow),
+            };
+            Row::new(vec![
+                Span::raw(ts_str),
+                Span::raw(ev.module.clone()),
+                Span::raw(ev.target.clone()),
+                Span::raw(ev.duration_ms.to_string()),
+                Span::styled(ev.status.clone(), status_style),
+            ])
         })
         .collect();
 
-    let activity_widget = Paragraph::new(activity_lines)
-        .block(Block::default().borders(Borders::ALL).title("Activity"));
+    let activity_widget = Table::new(rows)
+        .header(header)
+        .block(Block::default().borders(Borders::ALL).title("Activity"))
+        .widths(&[
+            Constraint::Length(19),
+            Constraint::Length(16),
+            Constraint::Min(10),
+            Constraint::Length(8),
+            Constraint::Length(8),
+        ]);
     f.render_widget(activity_widget, right_chunks[2]);
 
     // Status bar
