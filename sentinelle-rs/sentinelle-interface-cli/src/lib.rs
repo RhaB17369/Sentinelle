@@ -51,7 +51,8 @@ enum View {
     SigintTcpInput,
     SigintIcmpInput,
     SigintTracerouteInput,
-    ProfileInput,
+    ProfileIpInput,
+    ProfileEmailInput,
 }
 
 struct App {
@@ -155,6 +156,7 @@ fn ui<B: ratatui::backend::Backend>(f: &mut ratatui::Frame<B>, app: &App) {
                 "SIGINT ICMP",
                 "SIGINT Traceroute",
                 "Profil complet IP",
+                "Profil complet Email",
                 "Quitter",
             ];
             let list_items: Vec<ListItem> = items
@@ -183,7 +185,8 @@ fn ui<B: ratatui::backend::Backend>(f: &mut ratatui::Frame<B>, app: &App) {
                 View::SigintTcpInput => "IP:port pour SIGINT TCP (ex: 1.2.3.4:443): ",
                 View::SigintIcmpInput => "IP cible (SIGINT ICMP): ",
                 View::SigintTracerouteInput => "IP cible (SIGINT Traceroute): ",
-                View::ProfileInput => "IP cible (Profil complet): ",
+                View::ProfileIpInput => "IP cible (Profil complet IP): ",
+                View::ProfileEmailInput => "Email cible (Profil complet Email): ",
                 View::MainMenu => "",
             };
             let input = Paragraph::new(app.input.as_str())
@@ -222,7 +225,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, io::Error> {
                 }
             }
             KeyCode::Down => {
-                if app.selected_menu < 7 {
+                if app.selected_menu < 8 {
                     app.selected_menu += 1;
                 }
             }
@@ -236,8 +239,9 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, io::Error> {
                     3 => app.view = View::SigintTcpInput,
                     4 => app.view = View::SigintIcmpInput,
                     5 => app.view = View::SigintTracerouteInput,
-                    6 => app.view = View::ProfileInput,
-                    7 => return Ok(false),
+                    6 => app.view = View::ProfileIpInput,
+                    7 => app.view = View::ProfileEmailInput,
+                    8 => return Ok(false),
                     _ => {}
                 }
             }
@@ -258,7 +262,8 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, io::Error> {
                     View::SigintTcpInput => run_sigint_tcp(app, &input),
                     View::SigintIcmpInput => run_sigint_icmp(app, &input),
                     View::SigintTracerouteInput => run_sigint_traceroute(app, &input),
-                    View::ProfileInput => run_profile(app, &input),
+                    View::ProfileIpInput => run_profile_ip(app, &input),
+                    View::ProfileEmailInput => run_profile_email(app, &input),
                     View::MainMenu => {}
                 }
                 app.view = View::MainMenu;
@@ -476,7 +481,7 @@ fn run_sigint_traceroute(app: &mut App, input: &str) {
     }
 }
 
-fn run_profile(app: &mut App, input: &str) {
+fn run_profile_ip(app: &mut App, input: &str) {
     let ip: IpAddr = match input.parse() {
         Ok(ip) => ip,
         Err(_) => {
@@ -499,8 +504,7 @@ fn run_profile(app: &mut App, input: &str) {
         Err(e) => app.log_line(format!("IP Intel erreur: {}", e)),
     }
 
-    // Domain Intelligence (si FQDN associé fourni par l'utilisateur)
-    // Pour l'instant, on utilise le reverse DNS simple comme FQDN candidat.
+    // Domain Intelligence via reverse DNS si possible
     if let Ok(host) = dns_lookup::lookup_addr(&ip) {
         let domain_engine = DomainIntelEngine::new();
         let domain_usecase = RunDomainIntel::new(&domain_engine);
@@ -536,4 +540,68 @@ fn run_profile(app: &mut App, input: &str) {
     run_sigint_traceroute(app, input);
 
     app.log_line(format!("=== Fin du profil pour {} ===", ip));
+}
+
+fn run_profile_email(app: &mut App, input: &str) {
+    let email = match Email::parse(input) {
+        Ok(e) => e,
+        Err(e) => {
+            app.log_line(format!("Email invalide: {}", e));
+            return;
+        }
+    };
+
+    app.log_line(format!("=== Profil complet Email pour {} ===", email.as_str()));
+
+    // Mail OSINT (présence sur services)
+    let mail_engine = MailOsintEngine::new_with_default_probes();
+    let mail_usecase = RunMailScan::new(&mail_engine);
+    match mail_usecase.execute(email.clone()) {
+        Ok(summary) => {
+            app.log_line("Mail OSINT:");
+            for svc in summary.services {
+                app.log_line(format!(
+                    "  {:20} exists={} error={}",
+                    svc.service_name, svc.exists, svc.error
+                ));
+            }
+        }
+        Err(e) => app.log_line(format!("Mail OSINT erreur: {}", e)),
+    }
+
+    // EmailRecon (DNS, CT logs, archives)
+    let recon_engine = EmailReconEngine::new();
+    let recon_usecase = RunEmailRecon::new(&recon_engine);
+    match recon_usecase.execute(email.clone()) {
+        Ok(res) => {
+            app.log_line(format!("EmailRecon domaine {}:", res.domain));
+            if let Some(dns) = res.dns {
+                app.log_line(format!("  MX hosts      : {:?}", dns.mx_hosts));
+                app.log_line(format!("  Providers     : {:?}", dns.inferred_providers));
+            }
+            app.log_line(format!("  CT domains    : {} entrées", res.ct_domains.len()));
+            app.log_line(format!("  Wayback hits  : {}", res.archive_hits));
+            app.log_line(format!("  CCrawl hits   : {}", res.common_crawl_hits));
+        }
+        Err(e) => app.log_line(format!("EmailRecon erreur: {}", e)),
+    }
+
+    // Social OSINT (username/email sur les sites sociaux)
+    let social_engine = SocialOsintEngine::new_with_default_probes();
+    let social_usecase = RunSocialScan::new(&social_engine);
+    let target = SocialTarget::Email(email);
+    match social_usecase.execute(target) {
+        Ok(result) => {
+            app.log_line("Social OSINT (Email):");
+            for acc in result.accounts {
+                app.log_line(format!(
+                    "  {:20} status={:?} url={:?}",
+                    acc.site_name, acc.status, acc.profile_url
+                ));
+            }
+        }
+        Err(e) => app.log_line(format!("Social OSINT erreur: {}", e)),
+    }
+
+    app.log_line("=== Fin du profil Email ===");
 }
