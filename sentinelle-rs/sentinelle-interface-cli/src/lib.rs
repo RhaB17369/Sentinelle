@@ -80,6 +80,17 @@ enum ReportKind {
     Email(ReportEmail),
 }
 
+enum ReportMode {
+    Full,
+    Summary,
+}
+
+enum ActivityFilterMode {
+    Both,
+    Module,
+    Target,
+}
+
 struct App {
     view: View,
     input: String,
@@ -91,6 +102,9 @@ struct App {
     activity_scroll: usize,
     report: ReportKind,
     activity_filter: String,
+    activity_filter_mode: ActivityFilterMode,
+    active_section: Option&lt;String&gt;,
+    report_mode: ReportMode,
 }
 
 impl App {
@@ -112,6 +126,9 @@ impl App {
             activity_scroll: 0,
             report: ReportKind::None,
             activity_filter: String::new(),
+            activity_filter_mode: ActivityFilterMode::Both,
+            active_section: None,
+            report_mode: ReportMode::Full,
         }
     }
 
@@ -300,7 +317,32 @@ fn ui<B: ratatui::backend::Backend>(f: &mut ratatui::Frame<B>, app: &App) {
     match &app.report {
         ReportKind::Ip(report) => {
             let visible_rows = (right_chunks[1].height as usize).saturating_sub(3);
-            let total_rows = report.rows.len();
+
+            // Appliquer éventuel zoom de section et mode résumé
+            let filtered_rows: Vec<&Vec<String>> = report
+                .rows
+                .iter()
+                .filter(|row| {
+                    let section = row.get(0).map(|s| s.as_str()).unwrap_or("");
+                    let section_ok = match &app.active_section {
+                        None => true,
+                        Some(active) => section == active,
+                    };
+                    let summary_ok = match app.report_mode {
+                        ReportMode::Full => true,
+                        ReportMode::Summary => match section {
+                            "IP" => matches!(row.get(1).map(String::as_str), Some("Adresse") | Some("Pays") | Some("ISP")),
+                            "Domain" => matches!(row.get(1).map(String::as_str), Some("Host") | Some("Registrar")),
+                            "SIGINT TCP" => matches!(row.get(1).map(String::as_str), Some("OS")),
+                            "Traceroute" => matches!(row.get(1).map(String::as_str), Some("Hops")),
+                            _ => false,
+                        },
+                    };
+                    section_ok && summary_ok
+                })
+                .collect();
+
+            let total_rows = filtered_rows.len();
             let max_scroll = total_rows.saturating_sub(visible_rows);
             let scroll = app.output_scroll.min(max_scroll);
             let start = total_rows.saturating_sub(visible_rows + scroll);
@@ -314,8 +356,7 @@ fn ui<B: ratatui::backend::Backend>(f: &mut ratatui::Frame<B>, app: &App) {
                     .collect::<Vec<_>>(),
             );
 
-            let rows: Vec<Row> = report
-                .rows
+            let rows: Vec<Row> = filtered_rows
                 .iter()
                 .skip(start)
                 .take(end.saturating_sub(start))
@@ -330,11 +371,9 @@ fn ui<B: ratatui::backend::Backend>(f: &mut ratatui::Frame<B>, app: &App) {
                     };
 
                     let mut spans = Vec::new();
-                    // Section column with style
                     if let Some(sec) = cols.get(0) {
                         spans.push(Span::styled(sec.clone(), section_style));
                     }
-                    // Other columns as raw
                     for c in cols.iter().skip(1) {
                         spans.push(Span::raw(c.clone()));
                     }
@@ -355,7 +394,40 @@ fn ui<B: ratatui::backend::Backend>(f: &mut ratatui::Frame<B>, app: &App) {
         }
         ReportKind::Email(report) => {
             let visible_rows = (right_chunks[1].height as usize).saturating_sub(3);
-            let total_rows = report.rows.len();
+
+            let filtered_rows: Vec<&Vec<String>> = report
+                .rows
+                .iter()
+                .filter(|row| {
+                    let section = row.get(0).map(|s| s.as_str()).unwrap_or("");
+                    let section_ok = match &app.active_section {
+                        None => true,
+                        Some(active) => section == active,
+                    };
+                    let summary_ok = match app.report_mode {
+                        ReportMode::Full => true,
+                        ReportMode::Summary => match section {
+                            "Mail OSINT" => {
+                                // lignes où exists=true
+                                row.get(2).map(String::as_str) == Some("true")
+                            }
+                            "EmailRecon" => matches!(
+                                row.get(1).map(String::as_str),
+                                Some("Domaine")
+                                    | Some("MX")
+                                    | Some("CT domains")
+                                    | Some("Wayback hits")
+                                    | Some("CCrawl hits")
+                            ),
+                            "Social" => row.get(2).map(String::as_str) != Some("NotFound"),
+                            _ => false,
+                        },
+                    };
+                    section_ok && summary_ok
+                })
+                .collect();
+
+            let total_rows = filtered_rows.len();
             let max_scroll = total_rows.saturating_sub(visible_rows);
             let scroll = app.output_scroll.min(max_scroll);
             let start = total_rows.saturating_sub(visible_rows + scroll);
@@ -369,8 +441,7 @@ fn ui<B: ratatui::backend::Backend>(f: &mut ratatui::Frame<B>, app: &App) {
                     .collect::<Vec<_>>(),
             );
 
-            let rows: Vec<Row> = report
-                .rows
+            let rows: Vec<Row> = filtered_rows
                 .iter()
                 .skip(start)
                 .take(end.saturating_sub(start))
@@ -426,19 +497,43 @@ fn ui<B: ratatui::backend::Backend>(f: &mut ratatui::Frame<B>, app: &App) {
         }
     }
 
-    // Activity pane avec filtre, scroll et rendu tabulaire
+    // Activity pane avec filtre, stats, scroll et rendu tabulaire
     let filtered_activity: Vec<&ActivityEvent> = if app.activity_filter.is_empty() {
         app.activity.iter().collect()
     } else {
         app.activity
             .iter()
-            .filter(|ev| {
-                ev.module.contains(&app.activity_filter) || ev.target.contains(&app.activity_filter)
+            .filter(|ev| match app.activity_filter_mode {
+                ActivityFilterMode::Both => {
+                    ev.module.contains(&app.activity_filter)
+                        || ev.target.contains(&app.activity_filter)
+                }
+                ActivityFilterMode::Module => ev.module.contains(&app.activity_filter),
+                ActivityFilterMode::Target => ev.target.contains(&app.activity_filter),
             })
             .collect()
     };
 
-    let visible_activity_lines = (right_chunks[2].height as usize).saturating_sub(3); // header + bordures
+    let total_events = app.activity.len();
+    let filtered_events = filtered_activity.len();
+    let done_count = filtered_activity
+        .iter()
+        .filter(|ev| ev.status == "done")
+        .count();
+    let error_count = filtered_activity
+        .iter()
+        .filter(|ev| ev.status == "error")
+        .count();
+
+    let stats_row = Row::new(vec![Span::styled(
+        format!(
+            "Total: {} | done: {} | error: {} | filtered: {}",
+            total_events, done_count, error_count, filtered_events
+        ),
+        Style::default().add_modifier(Modifier::DIM),
+    )]);
+
+    let visible_activity_lines = (right_chunks[2].height as usize).saturating_sub(4); // header + stats + bordures
     let total_activity_lines = filtered_activity.len();
     let max_activity_scroll = total_activity_lines.saturating_sub(visible_activity_lines);
     let activity_scroll = app.activity_scroll.min(max_activity_scroll);
@@ -453,29 +548,33 @@ fn ui<B: ratatui::backend::Backend>(f: &mut ratatui::Frame<B>, app: &App) {
         Span::styled("Status", Style::default().add_modifier(Modifier::BOLD)),
     ]);
 
-    let rows: Vec<Row> = filtered_activity
-        .iter()
-        .skip(a_start)
-        .take(a_end.saturating_sub(a_start))
-        .map(|ev| {
-            let ev = *ev;
-            let dt = NaiveDateTime::from_timestamp_opt(ev.ts as i64, 0)
-                .unwrap_or_else(|| NaiveDateTime::from_timestamp_opt(0, 0).unwrap());
-            let ts_str = dt.format("%Y-%m-%d %H:%M:%S").to_string();
-            let status_style = match ev.status.as_str() {
-                "done" => Style::default().fg(Color::Green),
-                "error" => Style::default().fg(Color::Red),
-                _ => Style::default().fg(Color::Yellow),
-            };
-            Row::new(vec![
-                Span::raw(ts_str),
-                Span::raw(ev.module.clone()),
-                Span::raw(ev.target.clone()),
-                Span::raw(ev.duration_ms.to_string()),
-                Span::styled(ev.status.clone(), status_style),
-            ])
-        })
-        .collect();
+    let mut rows: Vec<Row> = Vec::new();
+    rows.push(stats_row);
+
+    rows.extend(
+        filtered_activity
+            .iter()
+            .skip(a_start)
+            .take(a_end.saturating_sub(a_start))
+            .map(|ev| {
+                let ev = *ev;
+                let dt = NaiveDateTime::from_timestamp_opt(ev.ts as i64, 0)
+                    .unwrap_or_else(|| NaiveDateTime::from_timestamp_opt(0, 0).unwrap());
+                let ts_str = dt.format("%Y-%m-%d %H:%M:%S").to_string();
+                let status_style = match ev.status.as_str() {
+                    "done" => Style::default().fg(Color::Green),
+                    "error" => Style::default().fg(Color::Red),
+                    _ => Style::default().fg(Color::Yellow),
+                };
+                Row::new(vec![
+                    Span::raw(ts_str),
+                    Span::raw(ev.module.clone()),
+                    Span::raw(ev.target.clone()),
+                    Span::raw(ev.duration_ms.to_string()),
+                    Span::styled(ev.status.clone(), status_style),
+                ])
+            }),
+    );
 
     let activity_widget = Table::new(rows)
         .header(header)
@@ -491,7 +590,7 @@ fn ui<B: ratatui::backend::Backend>(f: &mut ratatui::Frame<B>, app: &App) {
 
     // Status bar
     let status_text = format!(
-        "Esc: retour / q: quitter  |  PgUp/PgDn/Scroll: output  |  a/z: activity  |  f: filtre activité='{}'  |  c: clear filtre",
+        "Esc: retour / q: quitter  |  PgUp/PgDn/Scroll: output  |  a/z: activity  |  f: filtre activité='{}' (m:/t:/both) |  c: clear filtre  |  Tab: section suivante  |  r: résumé/complet",
         app.activity_filter
     );
     let status = Paragraph::new(status_text)
@@ -526,12 +625,70 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, io::Error> {
                 app.activity_scroll = app.activity_scroll.saturating_sub(1);
             }
             KeyCode::Char('f') => {
-                app.activity_filter = app.input.trim().to_string();
+                let raw = app.input.trim();
+                if let Some(rest) = raw.strip_prefix("m:") {
+                    app.activity_filter_mode = ActivityFilterMode::Module;
+                    app.activity_filter = rest.to_string();
+                } else if let Some(rest) = raw.strip_prefix("t:") {
+                    app.activity_filter_mode = ActivityFilterMode::Target;
+                    app.activity_filter = rest.to_string();
+                } else {
+                    app.activity_filter_mode = ActivityFilterMode::Both;
+                    app.activity_filter = raw.to_string();
+                }
                 app.activity_scroll = 0;
             }
             KeyCode::Char('c') => {
                 app.activity_filter.clear();
+                app.activity_filter_mode = ActivityFilterMode::Both;
                 app.activity_scroll = 0;
+            }
+            KeyCode::Tab => {
+                // Zoom section suivante sur rapport courant
+                let sections: Vec<String> = match &app.report {
+                    ReportKind::Ip(r) => r
+                        .rows
+                        .iter()
+                        .map(|row| row[0].clone())
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .into_iter()
+                        .collect(),
+                    ReportKind::Email(r) => r
+                        .rows
+                        .iter()
+                        .map(|row| row[0].clone())
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .into_iter()
+                        .collect(),
+                    ReportKind::None => Vec::new(),
+                };
+                if sections.is_empty() {
+                    app.active_section = None;
+                } else {
+                    let next = match &app.active_section {
+                        None => sections.first().cloned(),
+                        Some(current) => {
+                            let mut iter = sections.iter();
+                            let mut found = None;
+                            while let Some(s) = iter.next() {
+                                if s == current {
+                                    found = iter.next().cloned();
+                                    break;
+                                }
+                            }
+                            found.or_else(|| sections.first().cloned())
+                        }
+                    };
+                    app.active_section = next;
+                    app.output_scroll = 0;
+                }
+            }
+            KeyCode::Char('r') => {
+                app.report_mode = match app.report_mode {
+                    ReportMode::Full => ReportMode::Summary,
+                    ReportMode::Summary => ReportMode::Full,
+                };
+                app.output_scroll = 0;
             }
             KeyCode::Enter => {
                 app.input.clear();
