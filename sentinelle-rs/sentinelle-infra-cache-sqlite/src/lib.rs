@@ -20,9 +20,9 @@ pub struct SqliteCache {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct CacheRow {
-    value: String,
-    updated_at: u64,
+pub struct CacheRow {
+    pub value: String,
+    pub updated_at: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
