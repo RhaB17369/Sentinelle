@@ -6,6 +6,8 @@ members = [
     "sentinelle-infra-osint-ip",
     "sentinelle-infra-osint-mail",
     "sentinelle-infra-osint-social",
+    "sentinelle-infra-email-recon",
+    "sentinelle-infra-domain-intel",
     "sentinelle-infra-cache-sqlite",
     "sentinelle-infra-metrics",
     "sentinelle-interface-cli",
