@@ -1,4 +1,4 @@
-use crate::probe::{MailServiceProbe, ProbeError, MockProbe};
+use crate::probe::{MailServiceProbe, ProbeError, GravatarProbe};
 use futures::stream::{FuturesUnordered, StreamExt};
 use reqwest::Client;
 use sentinelle_domain::{
@@ -18,12 +18,20 @@ pub struct MailOsintEngine {
 }
 
 impl MailOsintEngine {
+    /// Configure un moteur avec un ensemble de probes réels.
     pub fn new_with_default_probes() -> Self {
         let http = Client::new();
-        let probes: Vec<Arc<dyn MailServiceProbe>> = vec![Arc::new(MockProbe::default())];
+        let probes: Vec<Arc<dyn MailServiceProbe>> = vec![
+            Arc::new(GravatarProbe::default()),
+        ];
 
         Self { http, probes }
     }
+
+    pub fn new(http: Client, probes: Vec<Arc<dyn MailServiceProbe>>) -> Self {
+        Self { http, probes }
+    }
+}
 
     pub fn new(http: Client, probes: Vec<Arc<dyn MailServiceProbe>>) -> Self {
         Self { http, probes }

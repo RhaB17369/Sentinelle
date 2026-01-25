@@ -1,4 +1,4 @@
-use crate::probe::{SocialServiceProbe, SocialProbeError, MockSocialProbe};
+use crate::probe::{SocialServiceProbe, SocialProbeError, GithubProbe, XProbe};
 use futures::stream::{FuturesUnordered, StreamExt};
 use reqwest::Client;
 use sentinelle_domain::{
@@ -17,12 +17,21 @@ pub struct SocialOsintEngine {
 }
 
 impl SocialOsintEngine {
+    /// Configure un moteur avec des probes réels (GitHub, X/Twitter).
     pub fn new_with_default_probes() -> Self {
         let http = Client::new();
-        let probes: Vec<Arc<dyn SocialServiceProbe>> = vec![Arc::new(MockSocialProbe::default())];
+        let probes: Vec<Arc<dyn SocialServiceProbe>> = vec![
+            Arc::new(GithubProbe::default()),
+            Arc::new(XProbe::default()),
+        ];
 
         Self { http, probes }
     }
+
+    pub fn new(http: Client, probes: Vec<Arc<dyn SocialServiceProbe>>) -> Self {
+        Self { http, probes }
+    }
+}
 
     pub fn new(http: Client, probes: Vec<Arc<dyn SocialServiceProbe>>) -> Self {
         Self { http, probes }
