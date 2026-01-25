@@ -14,7 +14,7 @@ pub enum CacheError {
 }
 
 /// Cache simple basé sur SQLite pour stocker des profils (IP, email, etc.)
-/// Clé arbitraire, valeur = JSON sérialisé (par ex. Vec&lt;String&gt; de lignes de rapport).
+/// et un journal global d'activité.
 pub struct SqliteCache {
     conn: Connection,
 }
@@ -25,6 +25,16 @@ struct CacheRow {
     updated_at: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActivityEvent {
+    pub ts: u64,
+    pub module: String,
+    pub target: String,
+    pub kind: String,
+    pub duration_ms: u64,
+    pub status: String,
+}
+
 impl SqliteCache {
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self, CacheError> {
         let conn = Connection::open(path).map_err(|_| CacheError::Sqlite)?;
@@ -33,6 +43,15 @@ impl SqliteCache {
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL,
                 updated_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS activity (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts INTEGER NOT NULL,
+                module TEXT NOT NULL,
+                target TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                duration_ms INTEGER NOT NULL,
+                status TEXT NOT NULL
             );",
         )
         .map_err(|_| CacheError::Sqlite)?;
@@ -86,5 +105,54 @@ impl SqliteCache {
         } else {
             Ok(None)
         }
+    }
+
+    pub fn log_activity(&self, ev: &ActivityEvent) -> Result<(), CacheError> {
+        self.conn
+            .execute(
+                "INSERT INTO activity (ts, module, target, kind, duration_ms, status)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    ev.ts as i64,
+                    ev.module,
+                    ev.target,
+                    ev.kind,
+                    ev.duration_ms as i64,
+                    ev.status
+                ],
+            )
+            .map_err(|_| CacheError::Sqlite)?;
+        Ok(())
+    }
+
+    pub fn recent_activity(&self, limit: usize) -> Result<Vec<ActivityEvent>, CacheError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT ts, module, target, kind, duration_ms, status
+                 FROM activity
+                 ORDER BY id DESC
+                 LIMIT ?1",
+            )
+            .map_err(|_| CacheError::Sqlite)?;
+
+        let rows = stmt
+            .query_map(params![limit as i64], |row| {
+                Ok(ActivityEvent {
+                    ts: row.get::<_, i64>(0)? as u64,
+                    module: row.get(1)?,
+                    target: row.get(2)?,
+                    kind: row.get(3)?,
+                    duration_ms: row.get::<_, i64>(4)? as u64,
+                    status: row.get(5)?,
+                })
+            })
+            .map_err(|_| CacheError::Sqlite)?;
+
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|_| CacheError::Sqlite)?);
+        }
+        Ok(out)
     }
 }

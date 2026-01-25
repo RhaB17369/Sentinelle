@@ -31,9 +31,10 @@ use sentinelle_infra_osint_mail::MailOsintEngine;
 use sentinelle_infra_osint_social::SocialOsintEngine;
 use sentinelle_infra_email_recon::EmailReconEngine;
 use sentinelle_infra_domain_intel::DomainIntelEngine;
-use sentinelle_infra_cache_sqlite::SqliteCache;
+use sentinelle_infra_cache_sqlite::{SqliteCache, ActivityEvent};
 use std::io;
 use std::net::IpAddr;
+use std::time::{SystemTime, UNIX_EPOCH, Instant};
 use serde::{Serialize, Deserialize};
 
 const BANNER: &[&str] = &[
@@ -68,20 +69,28 @@ struct App {
     log: Vec<String>,
     selected_menu: usize,
     cache: SqliteCache,
+    activity: Vec<ActivityEvent>,
+    output_scroll: usize,
+    activity_scroll: usize,
 }
 
 impl App {
     fn new() -> Self {
         let cache = SqliteCache::new("sentinelle_cache.db").unwrap_or_else(|_| {
-            // En dernier recours, un cache en mémoire temp (fichier éphémère)
             SqliteCache::new(":memory:").expect("cache sqlite")
         });
+
+        let activity = cache.recent_activity(200).unwrap_or_default();
+
         Self {
             view: View::MainMenu,
             input: String::new(),
             log: Vec::new(),
             selected_menu: 0,
             cache,
+            activity,
+            output_scroll: 0,
+            activity_scroll: 0,
         }
     }
 
@@ -106,6 +115,14 @@ impl App {
             lines: self.log.clone(),
         };
         let _ = self.cache.set_json(key, &cached);
+    }
+
+    fn push_activity(&mut self, ev: ActivityEvent) {
+        let _ = self.cache.log_activity(&ev);
+        self.activity.push(ev);
+        if self.activity.len() > 500 {
+            self.activity.drain(0..self.activity.len() - 500);
+        }
     }
 }
 
@@ -144,6 +161,18 @@ fn main_loop<B: ratatui::backend::Backend>(
                         break;
                     }
                 }
+                Event::Mouse(me) => {
+                    use crossterm::event::{MouseEventKind};
+                    match me.kind {
+                        MouseEventKind::ScrollUp => {
+                            app.output_scroll = app.output_scroll.saturating_add(1);
+                        }
+                        MouseEventKind::ScrollDown => {
+                            app.output_scroll = app.output_scroll.saturating_sub(1);
+                        }
+                        _ => {}
+                    }
+                }
                 _ => {}
             }
         }
@@ -151,7 +180,7 @@ fn main_loop<B: ratatui::backend::Backend>(
     Ok(())
 }
 
-fn ui&lt;B: ratatui::backend::Backend&gt;(f: &amp;mut ratatui::Frame&lt;B&gt;, app: &amp;App) {
+fn ui<B: ratatui::backend::Backend>(f: &mut ratatui::Frame<B>, app: &App) {
     // Layout global: header, zone principale, barre de statut
     let outer = Layout::default()
         .direction(Direction::Vertical)
@@ -163,7 +192,7 @@ fn ui&lt;B: ratatui::backend::Backend&gt;(f: &amp;mut ratatui::Frame&lt;B&gt;, a
         .split(f.size());
 
     // Header ASCII
-    let banner_lines: Vec&lt;Spans&gt; = BANNER
+    let banner_lines: Vec<Spans> = BANNER
         .iter()
         .map(|line| Spans::from(Span::styled(
             *line,
@@ -174,7 +203,7 @@ fn ui&lt;B: ratatui::backend::Backend&gt;(f: &amp;mut ratatui::Frame&lt;B&gt;, a
         .block(Block::default().borders(Borders::ALL).title("SENTINELLE OSINT / SIGINT"));
     f.render_widget(header, outer[0]);
 
-    // Zone principale: à la bpytop, panneau gauche (menu) + panneau droit (input + output)
+    // Zone principale: panneau gauche (menu) + panneau droit (input + output + activity)
     let main_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
@@ -193,7 +222,7 @@ fn ui&lt;B: ratatui::backend::Backend&gt;(f: &amp;mut ratatui::Frame&lt;B&gt;, a
             "Profil complet Email",
             "Quitter",
         ];
-        let list_items: Vec&lt;ListItem&gt; = items
+        let list_items: Vec<ListItem> = items
             .iter()
             .enumerate()
             .map(|(i, item)| {
@@ -212,35 +241,44 @@ fn ui&lt;B: ratatui::backend::Backend&gt;(f: &amp;mut ratatui::Frame&lt;B&gt;, a
         f.render_widget(menu, main_chunks[0]);
     }
 
-    // Panneau droit: input en haut, output en bas
+    // Panneau droit: input en haut, output au milieu, activity en bas
     let right_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(3)])
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(5),
+            Constraint::Length(7),
+        ])
         .split(main_chunks[1]);
 
     // Input / cible courante
     let prompt = match app.view {
-        View::IpInput =&gt; "IP cible (IP Intel): ",
-        View::MailInput =&gt; "Email cible: ",
-        View::SocialInput =&gt; "Username cible: ",
-        View::SigintTcpInput =&gt; "IP:port pour SIGINT TCP (ex: 1.2.3.4:443): ",
-        View::SigintIcmpInput =&gt; "IP cible (SIGINT ICMP): ",
-        View::SigintTracerouteInput =&gt; "IP cible (SIGINT Traceroute): ",
-        View::ProfileIpInput =&gt; "IP cible (Profil complet IP): ",
-        View::ProfileEmailInput =&gt; "Email cible (Profil complet Email): ",
-        View::MainMenu =&gt; "Sélectionnez un module et appuyez sur Entrée",
+        View::IpInput => "IP cible (IP Intel): ",
+        View::MailInput => "Email cible: ",
+        View::SocialInput => "Username cible: ",
+        View::SigintTcpInput => "IP:port pour SIGINT TCP (ex: 1.2.3.4:443): ",
+        View::SigintIcmpInput => "IP cible (SIGINT ICMP): ",
+        View::SigintTracerouteInput => "IP cible (SIGINT Traceroute): ",
+        View::ProfileIpInput => "IP cible (Profil complet IP): ",
+        View::ProfileEmailInput => "Email cible (Profil complet Email): ",
+        View::MainMenu => "Sélectionnez un module et appuyez sur Entrée",
     };
     let input = Paragraph::new(app.input.as_str())
         .block(Block::default().borders(Borders::ALL).title(prompt));
     f.render_widget(input, right_chunks[0]);
 
-    // Log / output pane (tableau dynamique de lignes)
-    let log_lines: Vec&lt;Spans&gt; = app
+    // Output pane avec scroll
+    let visible_output_lines = (right_chunks[1].height as usize).saturating_sub(2);
+    let total_output_lines = app.log.len();
+    let max_output_scroll = total_output_lines.saturating_sub(visible_output_lines);
+    let output_scroll = app.output_scroll.min(max_output_scroll);
+    let start = total_output_lines.saturating_sub(visible_output_lines + output_scroll);
+    let end = total_output_lines.saturating_sub(output_scroll);
+    let log_lines: Vec<Spans> = app
         .log
         .iter()
-        .rev()
-        .take((right_chunks[1].height as usize).saturating_sub(2))
-        .rev()
+        .skip(start)
+        .take(end.saturating_sub(start))
         .map(|l| Spans::from(Span::raw(l.as_str())))
         .collect();
 
@@ -248,8 +286,37 @@ fn ui&lt;B: ratatui::backend::Backend&gt;(f: &amp;mut ratatui::Frame&lt;B&gt;, a
         .block(Block::default().borders(Borders::ALL).title("Output"));
     f.render_widget(log_widget, right_chunks[1]);
 
+    // Activity pane avec scroll
+    let visible_activity_lines = (right_chunks[2].height as usize).saturating_sub(2);
+    let total_activity_lines = app.activity.len();
+    let max_activity_scroll = total_activity_lines.saturating_sub(visible_activity_lines);
+    let activity_scroll = app.activity_scroll.min(max_activity_scroll);
+    let a_start = total_activity_lines.saturating_sub(visible_activity_lines + activity_scroll);
+    let a_end = total_activity_lines.saturating_sub(activity_scroll);
+    let activity_lines: Vec<Spans> = app
+        .activity
+        .iter()
+        .skip(a_start)
+        .take(a_end.saturating_sub(a_start))
+        .map(|ev| {
+            let line = format!(
+                "{} {} {} {}ms {}",
+                ev.ts,
+                ev.module,
+                ev.target,
+                ev.duration_ms,
+                ev.status
+            );
+            Spans::from(Span::raw(line))
+        })
+        .collect();
+
+    let activity_widget = Paragraph::new(activity_lines)
+        .block(Block::default().borders(Borders::ALL).title("Activity"));
+    f.render_widget(activity_widget, right_chunks[2]);
+
     // Status bar
-    let status = Paragraph::new("Esc: retour / q: quitter")
+    let status = Paragraph::new("Esc: retour / q: quitter  |  PgUp/PgDn: scroll output  |  a/z: scroll activity")
         .style(Style::default().add_modifier(Modifier::DIM));
     f.render_widget(status, outer[2]);
 }
@@ -268,9 +335,22 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, io::Error> {
                     app.selected_menu += 1;
                 }
             }
+            KeyCode::PageUp => {
+                app.output_scroll = app.output_scroll.saturating_add(1);
+            }
+            KeyCode::PageDown => {
+                app.output_scroll = app.output_scroll.saturating_sub(1);
+            }
+            KeyCode::Char('a') => {
+                app.activity_scroll = app.activity_scroll.saturating_add(1);
+            }
+            KeyCode::Char('z') => {
+                app.activity_scroll = app.activity_scroll.saturating_sub(1);
+            }
             KeyCode::Enter => {
                 app.input.clear();
                 app.log.clear();
+                app.output_scroll = 0;
                 match app.selected_menu {
                     0 => app.view = View::IpInput,
                     1 => app.view = View::MailInput,
@@ -294,16 +374,33 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, io::Error> {
             KeyCode::Enter => {
                 // Valider l'input et lancer le module correspondant
                 let input = app.input.trim().to_string();
-                match app.view {
-                    View::IpInput => run_ip(app, &input),
-                    View::MailInput => run_mail(app, &input),
-                    View::SocialInput => run_social(app, &input),
-                    View::SigintTcpInput => run_sigint_tcp(app, &input),
-                    View::SigintIcmpInput => run_sigint_icmp(app, &input),
-                    View::SigintTracerouteInput => run_sigint_traceroute(app, &input),
-                    View::ProfileIpInput => run_profile_ip(app, &input),
-                    View::ProfileEmailInput => run_profile_email(app, &input),
-                    View::MainMenu => {}
+                let started = Instant::now();
+                let res = match app.view {
+                    View::IpInput => { run_ip(app, &input); ("ip_intel", input.clone(), "single") }
+                    View::MailInput => { run_mail(app, &input); ("mail_osint", input.clone(), "single") }
+                    View::SocialInput => { run_social(app, &input); ("social_osint", input.clone(), "single") }
+                    View::SigintTcpInput => { run_sigint_tcp(app, &input); ("sigint_tcp", input.clone(), "single") }
+                    View::SigintIcmpInput => { run_sigint_icmp(app, &input); ("sigint_icmp", input.clone(), "single") }
+                    View::SigintTracerouteInput => { run_sigint_traceroute(app, &input); ("sigint_traceroute", input.clone(), "single") }
+                    View::ProfileIpInput => { run_profile_ip(app, &input); ("profile_ip", input.clone(), "full") }
+                    View::ProfileEmailInput => { run_profile_email(app, &input); ("profile_email", input.clone(), "full") }
+                    View::MainMenu => ("noop", String::new(), "noop"),
+                };
+                if res.0 != "noop" {
+                    let duration = started.elapsed().as_millis() as u64;
+                    let ts = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let ev = ActivityEvent {
+                        ts,
+                        module: res.0.to_string(),
+                        target: res.1,
+                        kind: res.2.to_string(),
+                        duration_ms: duration,
+                        status: "done".to_string(),
+                    };
+                    app.push_activity(ev);
                 }
                 app.view = View::MainMenu;
                 app.input.clear();
