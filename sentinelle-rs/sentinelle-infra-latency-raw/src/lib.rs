@@ -5,7 +5,7 @@ use pnet::packet::icmp::IcmpPacket;
 use pnet::packet::ip::IpNextHeaderProtocols;
 use pnet::packet::tcp::{MutableTcpPacket, TcpFlags, TcpPacket};
 use pnet::packet::ipv4::Ipv4Packet;
-use pnet::packet::{MutablePacket, Packet};
+use pnet::packet::Packet;
 use pnet::transport::{transport_channel, TransportChannelType::Layer3, TransportReceiver, TransportSender};
 use regex::Regex;
 use sentinelle_domain::{
@@ -134,119 +134,118 @@ impl TcpSigintEngine {
         let mut buf = [0u8; 4096];
 
         while start.elapsed() < timeout {
-            match rx.recv_from(&mut buf) {
-                Ok((size, addr)) => {
-                    if addr != std::net::IpAddr::V4(ip) {
+            let size = match rx.recv(&mut buf) {
+                Ok(sz) => sz,
+                Err(_) => continue,
+            };
+
+            if let Some(ipv4) = Ipv4Packet::new(&buf[..size]) {
+                if std::net::IpAddr::V4(ip) != std::net::IpAddr::V4(ipv4.get_destination()) {
+                    // filtrage simple sur la destination si nécessaire
+                }
+                if ipv4.get_next_level_protocol() != IpNextHeaderProtocols::Tcp {
+                    continue;
+                }
+                if let Some(tcp) = TcpPacket::new(ipv4.payload()) {
+                    if tcp.get_destination() != 40000 {
                         continue;
                     }
-                    if let Some(ipv4) = Ipv4Packet::new(&buf[..size]) {
-                        if ipv4.get_next_level_protocol() != IpNextHeaderProtocols::Tcp {
-                            continue;
-                        }
-                        if let Some(tcp) = TcpPacket::new(ipv4.payload()) {
-                            if tcp.get_destination() != 40000 {
-                                continue;
-                            }
-                            if tcp.get_flags() & TcpFlags::SYN == TcpFlags::SYN
-                                && tcp.get_flags() & TcpFlags::ACK == TcpFlags::ACK
-                            {
-                                let win = tcp.get_window();
-                                let ttl = Some(ipv4.get_ttl());
-                                let ip_id = Some(ipv4.get_identification());
+                    if tcp.get_flags() & TcpFlags::SYN == TcpFlags::SYN
+                        && tcp.get_flags() & TcpFlags::ACK == TcpFlags::ACK
+                    {
+                        let win = tcp.get_window();
+                        let ttl = Some(ipv4.get_ttl());
+                        let ip_id = Some(ipv4.get_identification());
 
-                                // Parsing des options TCP brutes
-                                let mut options = Vec::new();
-                                let mut wscale = None;
-                                let mut sack_permitted = false;
-                                let mut ts_val = None;
-                                let mut ts_ecr = None;
+                        // Parsing des options TCP brutes
+                        let mut options = Vec::new();
+                        let mut wscale = None;
+                        let mut sack_permitted = false;
+                        let mut ts_val = None;
+                        let mut ts_ecr = None;
 
-                                if let Some(raw_opts) = tcp.get_options_raw() {
-                                    let mut i = 0;
-                                    while i < raw_opts.len() {
-                                        let kind = raw_opts[i];
-                                        match kind {
-                                            0 => {
-                                                options.push("EOL".to_string());
-                                                break;
-                                            }
-                                            1 => {
-                                                options.push("NOP".to_string());
-                                                i += 1;
-                                            }
-                                            2 => {
-                                                if i + 4 <= raw_opts.len() {
-                                                    options.push("MSS".to_string());
-                                                    i += 4;
-                                                } else {
-                                                    break;
-                                                }
-                                            }
-                                            3 => {
-                                                if i + 3 <= raw_opts.len() {
-                                                    wscale = Some(raw_opts[i + 2]);
-                                                    options.push("WS".to_string());
-                                                    i += 3;
-                                                } else {
-                                                    break;
-                                                }
-                                            }
-                                            4 => {
-                                                options.push("SACK".to_string());
-                                                sack_permitted = true;
-                                                i += 2;
-                                            }
-                                            8 => {
-                                                if i + 10 <= raw_opts.len() {
-                                                    let ts_bytes = &raw_opts[i + 2..i + 10];
-                                                    let ts_val_u32 = u32::from_be_bytes([
-                                                        ts_bytes[0], ts_bytes[1],
-                                                        ts_bytes[2], ts_bytes[3],
-                                                    ]);
-                                                    let ts_ecr_u32 = u32::from_be_bytes([
-                                                        ts_bytes[4], ts_bytes[5],
-                                                        ts_bytes[6], ts_bytes[7],
-                                                    ]);
-                                                    ts_val = Some(ts_val_u32);
-                                                    ts_ecr = Some(ts_ecr_u32);
-                                                    options.push("TS".to_string());
-                                                    i += 10;
-                                                } else {
-                                                    break;
-                                                }
-                                            }
-                                            _ => {
-                                                // Option inconnue : lire longueur et sauter
-                                                if i + 2 <= raw_opts.len() {
-                                                    let len = raw_opts[i + 1] as usize;
-                                                    if len < 2 || i + len > raw_opts.len() {
-                                                        break;
-                                                    }
-                                                    options.push(format!("OPT{}", kind));
-                                                    i += len;
-                                                } else {
-                                                    break;
-                                                }
-                                            }
-                                        }
+                        let raw_opts = tcp.payload();
+                        let mut i = 0;
+                        while i < raw_opts.len() {
+                            let kind = raw_opts[i];
+                            match kind {
+                                0 => {
+                                    options.push("EOL".to_string());
+                                    break;
+                                }
+                                1 => {
+                                    options.push("NOP".to_string());
+                                    i += 1;
+                                }
+                                2 => {
+                                    if i + 4 <= raw_opts.len() {
+                                        options.push("MSS".to_string());
+                                        i += 4;
+                                    } else {
+                                        break;
                                     }
                                 }
-
-                                return Some(TcpFingerprint {
-                                    window_size: win,
-                                    options,
-                                    wscale,
-                                    sack_permitted,
-                                    ts_val,
-                                    ts_ecr,
-                                    ttl,
-                                    ip_id,
-                                });
+                                3 => {
+                                    if i + 3 <= raw_opts.len() {
+                                        wscale = Some(raw_opts[i + 2]);
+                                        options.push("WS".to_string());
+                                        i += 3;
+                                    } else {
+                                        break;
+                                    }
+                                }
+                                4 => {
+                                    options.push("SACK".to_string());
+                                    sack_permitted = true;
+                                    i += 2;
+                                }
+                                8 => {
+                                    if i + 10 <= raw_opts.len() {
+                                        let ts_bytes = &raw_opts[i + 2..i + 10];
+                                        let ts_val_u32 = u32::from_be_bytes([
+                                            ts_bytes[0], ts_bytes[1],
+                                            ts_bytes[2], ts_bytes[3],
+                                        ]);
+                                        let ts_ecr_u32 = u32::from_be_bytes([
+                                            ts_bytes[4], ts_bytes[5],
+                                            ts_bytes[6], ts_bytes[7],
+                                        ]);
+                                        ts_val = Some(ts_val_u32);
+                                        ts_ecr = Some(ts_ecr_u32);
+                                        options.push("TS".to_string());
+                                        i += 10;
+                                    } else {
+                                        break;
+                                    }
+                                }
+                                _ => {
+                                    // Option inconnue : lire longueur et sauter
+                                    if i + 2 <= raw_opts.len() {
+                                        let len = raw_opts[i + 1] as usize;
+                                        if len < 2 || i + len > raw_opts.len() {
+                                            break;
+                                        }
+                                        options.push(format!("OPT{}", kind));
+                                        i += len;
+                                    } else {
+                                        break;
+                                    }
+                                }
                             }
                         }
+
+                        return Some(TcpFingerprint {
+                            window_size: win,
+                            options,
+                            wscale,
+                            sack_permitted,
+                            ts_val,
+                            ts_ecr,
+                            ttl,
+                            ip_id,
+                        });
                     }
                 }
-                Err(_) => continue,
             }
         }
 
