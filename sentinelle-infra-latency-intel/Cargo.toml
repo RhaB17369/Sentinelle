@@ -1,0 +1,12 @@
+[package]
+name = "sentinelle-infra-latency-intel"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+sentinelle-domain = { path = "../sentinelle-domain" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process"] }
+thiserror = "1"
+trust-dns-resolver = "0.23"
+reqwest = { version = "0.12", features = ["rustls-tls"] }
+regex = "1"

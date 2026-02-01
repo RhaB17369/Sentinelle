@@ -1,0 +1,11 @@
+[package]
+name = "sentinelle-bin"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+sentinelle-domain = { path = "../sentinelle-domain" }
+sentinelle-application = { path = "../sentinelle-application" }
+sentinelle-infra-osint-ip = { path = "../sentinelle-infra-osint-ip" }
+sentinelle-infra-metrics = { path = "../sentinelle-infra-metrics" }
+sentinelle-interface-cli = { path = "../sentinelle-interface-cli" }

@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+members = [
+    "sentinelle-bin",
+    "sentinelle-domain",
+    "sentinelle-application",
+    "sentinelle-interface-cli",
+    "sentinelle-infra-osint-ip",
+    "sentinelle-infra-osint-mail",
+    "sentinelle-infra-osint-social",
+    "sentinelle-infra-osint-advanced",
+    "sentinelle-infra-email-recon",
+    "sentinelle-infra-domain-intel",
+    "sentinelle-infra-phone-intel",
+    "sentinelle-infra-latency-intel",
+    "sentinelle-infra-latency-raw",
+    "sentinelle-infra-metrics",
+    "sentinelle-infra-cache-sqlite",
+    "sentinelle-infra-graph",
+]
+
+[workspace.dependencies]
+tokio = { version = "1.0", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
