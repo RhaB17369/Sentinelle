@@ -16,6 +16,9 @@ credentials/
 tokens/
 *.secret
 *.vault
+# Rust
+/target/
+**/*.rs.bk
 
 
 .github/*.env
