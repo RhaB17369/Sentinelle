@@ -3,9 +3,9 @@
 **Classification:** CONFIDENTIAL  
 **Project:** SENTINELLE OSINT/SIGINT Platform  
 **Version:** 1.0.0  
-**Date:** 2025-01-25  
+**Date:** 2026-01-25  
 **Auditor:** Senior Software Architect  
-**Reference:** SENT-ARCH-2025-001  
+**Reference:** SENT-ARCH-2026-001  
 
 ---
 
