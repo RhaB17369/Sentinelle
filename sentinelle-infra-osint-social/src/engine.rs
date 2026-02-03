@@ -40,12 +40,13 @@ impl SocialOsintEngine {
     async fn run_async(
         &self,
         target: SocialTarget,
+        options: sentinelle_domain::SocialScanOptions,
     ) -> Result<SocialScanResult, SocialScanError> {
         if self.probes.is_empty() {
             return Err(SocialScanError::External);
         }
 
-        // Suppression des println! qui cassent l'interface TUI
+        let _ = options; // placeholder for future depth-based behaviour
 
         let mut tasks = FuturesUnordered::new();
 
@@ -55,8 +56,6 @@ impl SocialOsintEngine {
             let probe_clone = Arc::clone(probe);
 
             tasks.push(async move {
-                // Suppression des println! qui cassent l'interface TUI
-                
                 let base = SocialAccount {
                     site_name: probe_clone.name().to_string(),
                     profile_url: None,
@@ -64,14 +63,8 @@ impl SocialOsintEngine {
                 };
 
                 match probe_clone.probe(&client, &target_clone).await {
-                    Ok(acc) => {
-                        // Suppression des println! qui cassent l'interface TUI
-                        acc
-                    },
-                    Err(SocialProbeError::Http | SocialProbeError::UnexpectedResponse) => {
-                        // Suppression des println! qui cassent l'interface TUI
-                        base
-                    },
+                    Ok(acc) => acc,
+                    Err(SocialProbeError::Http | SocialProbeError::UnexpectedResponse) => base,
                 }
             });
         }
@@ -85,7 +78,6 @@ impl SocialOsintEngine {
         let ai_analysis = self.generate_ai_analysis(&target, &accounts).await;
         
         let _found_count = accounts.iter().filter(|a| matches!(a.status, sentinelle_domain::AccountStatus::Found)).count();
-        // Suppression des println! qui cassent l'interface TUI
 
         Ok(SocialScanResult {
             target,
@@ -128,13 +120,17 @@ impl SocialOsintEngine {
             analysis.push("• Risk level: LOW - Limited digital footprint".to_string());
         }
         
-        Some(analysis.join("\n"))
-    }
-}
-
-impl SocialIntelligencePort for SocialOsintEngine {
+        Some(analysis.</old_code><new_code>impl SocialIntelligencePort for SocialOsintEngine {
     fn scan(&self, target: SocialTarget) -> Result<SocialScanResult, SocialScanError> {
+        self.scan_with_options(target, sentinelle_domain::SocialScanOptions::default())
+    }
+
+    fn scan_with_options(
+        &self,
+        target: SocialTarget,
+        options: sentinelle_domain::SocialScanOptions,
+    ) -> Result<SocialScanResult, SocialScanError> {
         let rt = tokio::runtime::Runtime::new().map_err(|_| SocialScanError::External)?;
-        rt.block_on(self.run_async(target))
+        rt.block_on(self.run_async(target, options))
     }
 }
