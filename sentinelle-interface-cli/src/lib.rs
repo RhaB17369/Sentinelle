@@ -1005,6 +1005,9 @@ fn run_social(app: &mut App, input: &str) {
     let usecase = RunSocialScan::new(&engine);
     let target = SocialTarget::Username(username.to_string());
 
+    let started = Instant::now();
+    let mut status = "done".to_string();
+
     match usecase.execute(target) {
         Ok(result) => {
             app.log_line("Social OSINT:");
@@ -1015,8 +1018,26 @@ fn run_social(app: &mut App, input: &str) {
                 ));
             }
         }
-        Err(e) => app.log_line(format!("Erreur Social: {}", e)),
+        Err(e) => {
+            app.log_line(format!("Erreur Social: {}", e));
+            status = "error".to_string();
+        }
     }
+
+    let duration = started.elapsed().as_millis() as u64;
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let ev = ActivityEvent {
+        ts,
+        module: "social_osint".to_string(),
+        target: username.to_string(),
+        kind: "single".to_string(),
+        duration_ms: duration,
+        status,
+    };
+    app.push_activity(ev);
 }
 fn run_sigint_tcp(app: &mut App, input: &str) {
     // Validation stricte du format IP:PORT
@@ -1501,6 +1522,10 @@ fn run_profile_email(app: &mut App, input: &str) {
     let social_engine = SocialOsintEngine::new_with_default_probes();
     let social_usecase = RunSocialScan::new(&social_engine);
     let target = SocialTarget::Email(email);
+
+    let started = Instant::now();
+    let social_status;
+
     match social_usecase.execute(target) {
         Ok(result) => {
             app.log_line("Social OSINT (Email):");
@@ -1516,6 +1541,7 @@ fn run_profile_email(app: &mut App, input: &str) {
                     acc.profile_url.unwrap_or_default(),
                 ]);
             }
+            social_status = "done".to_string();
         }
         Err(e) => {
             app.log_line(format!("Social OSINT erreur: {}", e));
@@ -1525,8 +1551,24 @@ fn run_profile_email(app: &mut App, input: &str) {
                 e.to_string(),
                 "".to_string(),
             ]);
+            social_status = "error".to_string();
         }
     }
+
+    let duration = started.elapsed().as_millis() as u64;
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let ev = ActivityEvent {
+        ts,
+        module: "social_osint".to_string(),
+        target: email.as_str().to_string(),
+        kind: "profile_email".to_string(),
+        duration_ms: duration,
+        status: social_status,
+    };
+    app.push_activity(ev);
 
     app.log_line("=== Fin du profil Email ===");
 
@@ -1590,6 +1632,9 @@ fn run_advanced_osint(app: &mut App, input: &str) {
         }
     };
 
+    let started = Instant::now();
+    let mut status = "done".to_string();
+
     match rt.block_on(engine.investigate(input, target_type)) {
         Ok(result) => {
             app.log_line("✅ Investigation terminée avec succès");
@@ -1651,8 +1696,24 @@ fn run_advanced_osint(app: &mut App, input: &str) {
         }
         Err(e) => {
             app.log_line(format!("❌ Erreur investigation: {}", e));
+            status = "error".to_string();
         }
     }
+
+    let duration = started.elapsed().as_millis() as u64;
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let ev = ActivityEvent {
+        ts,
+        module: "advanced_osint".to_string(),
+        target: input.to_string(),
+        kind: format!("{:?}", target_type),
+        duration_ms: duration,
+        status,
+    };
+    app.push_activity(ev);
 
     app.cache_save(&cache_key);
 }
