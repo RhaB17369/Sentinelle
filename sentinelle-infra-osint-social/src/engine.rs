@@ -46,11 +46,26 @@ impl SocialOsintEngine {
             return Err(SocialScanError::External);
         }
 
-        let _ = options; // placeholder for future depth-based behaviour
-
         let mut tasks = FuturesUnordered::new();
 
+        // Sélection simple en fonction de la profondeur :
+        // - Fast     : probes légères uniquement (GitHub)
+        // - Standard : toutes les probes par défaut
+        // - Deep     : identique à Standard pour l'instant (extension future)
         for probe in &self.probes {
+            match options.depth {
+                sentinelle_domain::SocialScanDepth::Fast => {
+                    if probe.name().eq_ignore_ascii_case("github") {
+                        // on garde uniquement GitHub en mode Fast
+                    } else {
+                        continue;
+                    }
+                }
+                sentinelle_domain::SocialScanDepth::Standard
+                | sentinelle_domain::SocialScanDepth::Deep => {
+                    // on garde toutes les probes pour l'instant
+                }
+            }
             let client = self.http.clone();
             let target_clone = target.clone();
             let probe_clone = Arc::clone(probe);
